@@ -1,0 +1,87 @@
+WHITESPACE = _{ " " | "\r" | "\n" | "\t" }
+descriptor = _{ SOI ~ meta ~ (statement+) ~ EOI }
+statement = {
+    (binding ~ ";") |
+    (require ~ ";") |
+    (expect ~ ";") | 
+    rustcode
+}
+binding = { "let" ~ ident ~ "=" ~ expr }
+meta = {
+    (testname | sighashes | command | tx_fee | test_type | request)+
+}
+testname = {
+    "name" ~ "=" ~ string ~ ";"
+}
+sighashes = {
+    "sighashes" ~ "=" ~ (("[" ~ "]") | ("[" ~ ident ~ ("," ~ ident)* ~ "]")) ~ ";"
+}
+command = {
+    "command" ~ "=" ~ constructor ~ ";"
+}
+tx_fee = {
+    "tx_fee" ~ "=" ~ expr ~ ";"
+}
+request = {
+    "request" ~ "=" ~ expr ~ ";"
+}
+test_type = _{ "result" ~ "=" ~ passfail ~ ";" }
+passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
+expr = { rustcode | default | sighash | walletid | literal | constructor  | ident }
+default = { "default" }
+literal = { string | number | array | mapping | option }
+option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
+field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
+ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
+walletid = { ("WalletId" ~ "(" ~ ident ~ ")")}
+sighash = {  ("Sighash" ~ "(" ~ ident ~ ")") }
+rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
+code = ${  (!("{" | "}") ~ ANY  | block)* }
+block = { "{" ~ code ~ "}" }
+require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
+requirement = { wallet | guid }
+guid = { "Guid" ~ "(" ~")" }
+wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
+expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
+expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid }
+get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }
+get_state = { "get" ~ "state" ~ "at" ~ expr ~ "->" ~ expr }
+set_state = { "set" ~ "state" ~ "at" ~ expr ~ "to" ~ expr }
+set_states = { "set" ~ "states" ~ mapping}
+get_sighash = { "sighash" ~ "->" ~ expr }
+get_guid = { "guid" ~ "->" ~ expr }
+delete_state = { "delete" ~ "state" ~ "at" ~ expr }
+
+
+
+constructor = { ident ~ struct_map }
+struct_map = {
+    ("{" ~ "}") |
+    ("{" ~ struct_pair ~ ("," ~ struct_pair)* ~ ((",") | ("," ~ "." ~ "." ~ default ))? ~ "}")
+}
+struct_pair = { ident ~ ":" ~ expr }
+mapping = {
+    ("{" ~ "}") |
+    ("{" ~ pair ~ ("," ~ pair)* ~ (",")? ~ "}")
+}
+pair = { expr ~ ":" ~ expr }
+
+
+string = ${ "\"" ~ inner ~ "\"" }
+inner = @{ char* }
+char = {
+    !("\"" | "\\") ~ ANY
+    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
+}
+number = @{
+    "-"?
+    ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)
+    ~ ("." ~ ASCII_DIGIT*)?
+    ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+    ~ (ASCII_ALPHANUMERIC+)?
+}
+array = {
+    "[" ~ "]" |
+    "[" ~ expr ~ ("," ~ expr)* ~ "]"
+}

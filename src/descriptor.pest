@@ -3,9 +3,13 @@ descriptor = _{ SOI ~ meta ~ (statement+) ~ EOI }
 statement = {
     (binding ~ ";") |
     (require ~ ";") |
-    (expect ~ ";") | 
+    (expect ~ ";")  |
+    unit            |
+    integration     | 
     rustcode
 }
+unit = { "unit" ~ "{" ~ statement* ~ "}" }
+integration = { "integration" ~ "{" ~ statement* ~ "}" }
 binding = { "let" ~ ident ~ "=" ~ expr }
 meta = {
     (testname | sighashes | command | tx_fee | test_type | request)+
@@ -27,7 +31,7 @@ request = {
 }
 test_type = _{ "result" ~ "=" ~ passfail ~ ";" }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { rustcode | default | sighash | walletid | literal | constructor  | ident }
+expr = { rustcode | default | sighash | walletid | guid_for | literal | constructor  | ident }
 default = { "default" }
 literal = { string | number | array | mapping | option }
 option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
@@ -35,12 +39,13 @@ field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 walletid = { ("WalletId" ~ "(" ~ ident ~ ")")}
 sighash = {  ("Sighash" ~ "(" ~ ident ~ ")") }
+guid_for = { "Guid" ~ "(" ~ ident ~ ")" }
 rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
 code = ${  (!("{" | "}") ~ ANY  | block)* }
 block = { "{" ~ code ~ "}" }
 require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
 requirement = { wallet | guid }
-guid = { "Guid" ~ "(" ~")" }
+guid = { "Guid" ~ "for" ~ ident }
 wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
 expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
 expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid }

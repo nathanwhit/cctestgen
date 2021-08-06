@@ -2,13 +2,14 @@ use std::{fs, str::FromStr};
 
 use color_eyre::{eyre::eyre, Result};
 use inflector::Inflector;
+use itertools::Itertools;
 use pest::{
     iterators::{Pair, Pairs},
     Parser,
 };
 use pest_derive::Parser;
 use proc_macro2::{Ident, Literal, TokenStream};
-use quote::{format_ident, quote, IdentFragment, ToTokens};
+use quote::{format_ident, quote, IdentFragment};
 use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
 
 #[derive(Parser)]
@@ -97,18 +98,18 @@ pub struct Field {
 }
 
 impl ToRust for Field {
-    fn to_rust(self, mode: Mode) -> TokenStream {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         let Self { name, value } = self;
-        let value = value.to_rust(mode);
-        quote! {
+        let value = value.to_rust(mode)?;
+        Ok(quote! {
             #name : #value
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    RustCode(TokenStream),
+    RustCode(String),
     Sighash(Sighash),
     Default,
     Ident(Ident),
@@ -117,6 +118,7 @@ pub enum Expr {
     Mapping(Mapping),
     Literal(Literal),
     WalletId(Ident),
+    GuidFor(Ident),
     Option(Option<Box<Expr>>),
 }
 
@@ -134,7 +136,7 @@ impl Default for Expr {
 #[derive(Debug, Clone)]
 pub enum Requirement {
     Wallet { sighash: Sighash, amount: Expr },
-    Guid,
+    Guid { id: Ident },
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +155,7 @@ pub enum Stmt {
     Binding { name: String, value: Expr },
     Require { requirements: Vec<Requirement> },
     Expect { expectations: Vec<Expectation> },
-    RustCode(TokenStream),
+    RustCode(String),
 }
 
 pub trait ParseAst: Sized {
@@ -167,9 +169,8 @@ impl ParseAst for Expr {
         match expr.as_rule() {
             Rule::code => {
                 let code = expr.as_str();
-                let ts = TokenStream::from_str(code)
-                    .map_err(|e| eyre!("Rust block was invalid Rust code : {:?}", e))?;
-                Ok(Expr::RustCode(ts))
+
+                Ok(Expr::RustCode(code.into()))
             }
             Rule::sighash => Ok(Expr::Sighash(Sighash::parse(expr)?)),
             Rule::literal => {
@@ -208,6 +209,9 @@ impl ParseAst for Expr {
             }
             Rule::ident => Ok(Expr::Ident(syn::parse_str(expr.as_str())?)),
             Rule::walletid => Ok(Expr::WalletId(syn::parse_str(
+                expr.into_inner().next().expecting(Rule::ident)?.as_str(),
+            )?)),
+            Rule::guid_for => Ok(Expr::GuidFor(syn::parse_str(
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
             Rule::default => Ok(Expr::Default),
@@ -277,7 +281,11 @@ impl ParseAst for Requirement {
                 let amount = Expr::parse(inner.next())?;
                 Ok(Requirement::Wallet { sighash, amount })
             }
-            Rule::guid => Ok(Requirement::Guid),
+            Rule::guid => {
+                let mut inner = req.into_inner();
+                let id = syn::parse_str(inner.next().expecting(Rule::ident)?.as_str())?;
+                Ok(Requirement::Guid { id })
+            }
             _ => unreachable!(),
         }
     }
@@ -361,9 +369,7 @@ impl ParseAst for Stmt {
             }
             Rule::code => {
                 let code = next.as_str();
-                let ts = TokenStream::from_str(code)
-                    .map_err(|e| eyre!("Rust block was invalid Rust code : {:?}", e))?;
-                Ok(Stmt::RustCode(ts))
+                Ok(Stmt::RustCode(code.into()))
             }
             _ => unreachable!(),
         }
@@ -371,18 +377,21 @@ impl ParseAst for Stmt {
 }
 
 impl ToRust for Command {
-    fn to_rust(self, mode: Mode) -> TokenStream {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         let Command { kind, fields } = self;
         let kind = format_ident!("{}", kind.as_ref());
-        let fields = fields.into_iter().map(|f| ToRust::to_rust(f, mode));
+        let fields = fields
+            .into_iter()
+            .map(|f| ToRust::to_rust(f, mode))
+            .collect::<Result<Vec<_>>>()?;
 
-        quote! {
+        Ok(quote! {
             #kind {
                 #(
                     #fields
                 ),*
             }
-        }
+        })
     }
 }
 
@@ -472,15 +481,22 @@ pub enum Mode {
 }
 
 pub trait ToRust {
-    fn to_rust(self, mode: Mode) -> TokenStream;
+    fn to_rust(self, mode: Mode) -> Result<TokenStream>;
 }
 
 impl ToRust for Expr {
-    fn to_rust(self, mode: Mode) -> TokenStream {
-        match self {
-            Expr::RustCode(code) => quote! {
-                #code
-            },
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match self {
+            Expr::RustCode(code) => {
+                let code = match mode {
+                    Mode::Unit => code,
+                    Mode::Integration => code.replace("crate", "ccprocessor_rust"),
+                };
+                let ts = TokenStream::from_str(&code).unwrap();
+                quote! {
+                    { #ts }
+                }
+            }
             Expr::Sighash(sig) => {
                 let id = format_ident!("{}", sig.0);
                 quote! {
@@ -494,7 +510,10 @@ impl ToRust for Expr {
                 { #ident.clone() }
             },
             Expr::Construction { name, fields } => {
-                let fields = fields.into_iter().map(|f| ToRust::to_rust(f, mode));
+                let fields = fields
+                    .into_iter()
+                    .map(|f| ToRust::to_rust(f, mode))
+                    .collect::<Result<Vec<_>>>()?;
                 quote! {
                     #name {
                         #( #fields ),*
@@ -502,7 +521,10 @@ impl ToRust for Expr {
                 }
             }
             Expr::Array(exprs) => {
-                let exprs = exprs.into_iter().map(|f| ToRust::to_rust(f, mode));
+                let exprs = exprs
+                    .into_iter()
+                    .map(|f| ToRust::to_rust(f, mode))
+                    .collect::<Result<Vec<_>>>()?;
                 quote! {
                     vec! [
                         #( #exprs ),*
@@ -521,7 +543,7 @@ impl ToRust for Expr {
             }
             Expr::Option(opt) => match opt {
                 Some(expr) => {
-                    let expr = expr.to_rust(mode);
+                    let expr = expr.to_rust(mode)?;
                     quote! {
                         { Some(#expr) }
                     }
@@ -530,23 +552,32 @@ impl ToRust for Expr {
                     { None }
                 },
             },
-        }
+            Expr::GuidFor(cmd) => {
+                let guid = command_to_guid(cmd);
+                quote! {
+                    { #guid.clone() }
+                }
+            }
+        })
     }
 }
 
 impl ToRust for Stmt {
-    fn to_rust(self, mode: Mode) -> TokenStream {
-        match self {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match self {
             Stmt::Binding { name, value } => {
                 let ident = format_ident!("{}", name);
-                let value = value.to_rust(mode);
+                let value = value.to_rust(mode)?;
 
                 quote! {
                     let mut #ident = { #value };
                 }
             }
             Stmt::Require { requirements } => {
-                let reqs = requirements.into_iter().map(|f| f.to_rust(mode));
+                let reqs = requirements
+                    .into_iter()
+                    .map(|f| f.to_rust(mode))
+                    .collect::<Result<Vec<_>>>()?;
 
                 quote! {
                     #(
@@ -555,7 +586,10 @@ impl ToRust for Stmt {
                 }
             }
             Stmt::Expect { expectations } => {
-                let exps = expectations.into_iter().map(|f| f.to_rust(mode));
+                let exps = expectations
+                    .into_iter()
+                    .map(|f| f.to_rust(mode))
+                    .collect::<Result<Vec<_>>>()?;
 
                 quote! {
                     #(
@@ -563,10 +597,18 @@ impl ToRust for Stmt {
                     )*
                 }
             }
-            Stmt::RustCode(code) => quote! {
-                { #code }
-            },
-        }
+            Stmt::RustCode(code) => {
+                let code = match mode {
+                    Mode::Unit => code,
+                    Mode::Integration => code.replace("crate", "ccprocessor_rust"),
+                };
+                let ts = TokenStream::from_str(&code).unwrap();
+
+                quote! {
+                    { #ts }
+                }
+            }
+        })
     }
 }
 
@@ -574,9 +616,13 @@ fn sig_to_walletid(sig: impl IdentFragment) -> Ident {
     format_ident!("_{}_wallet_id", sig)
 }
 
+fn command_to_guid(command: impl IdentFragment) -> Ident {
+    format_ident!("_{}_guid", command)
+}
+
 impl ToRust for Requirement {
-    fn to_rust(self, mode: Mode) -> TokenStream {
-        match mode {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match mode {
             Mode::Unit => match self {
                 Requirement::Wallet {
                     sighash: Sighash(sig),
@@ -588,20 +634,49 @@ impl ToRust for Requirement {
                         let #id = WalletId::from(&#sig);
                     }
                 }
-                Requirement::Guid => {
+                Requirement::Guid { id } => {
+                    let id = command_to_guid(&id);
                     quote! {
-                        let guid = Guid("some_guid".into());
+                        let #id = Guid("some_guid".into());
                     }
                 }
             },
-            Mode::Integration => todo!(),
-        }
+            Mode::Integration => match self {
+                Requirement::Wallet {
+                    sighash: Sighash(sig),
+                    amount,
+                } => {
+                    let id = sig_to_walletid(&sig);
+                    let sig = format_ident!("{}", sig);
+                    let amount = amount.to_rust(mode)?;
+                    quote! {
+                        {
+                            let collect_coins = ccprocessor_rust::handler::CollectCoins {
+                                amount: { #amount.into() },
+                                eth_address: "dummy".into(),
+                                blockchain_tx_id: "setup".into(),
+                            };
+                            let response = send_command(collect_coins, ports, None);
+                            assert!(matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed)));
+
+                        }
+                        let #id = WalletId::from(&#sig);
+                    }
+                }
+                Requirement::Guid { id } => {
+                    let id = command_to_guid(&id);
+                    quote! {
+                        let #id = Guid::from(make_nonce());
+                    }
+                }
+            },
+        })
     }
 }
 
 impl ToRust for Expectation {
-    fn to_rust(self, mode: Mode) -> TokenStream {
-        match mode {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match mode {
             Mode::Unit => match self {
                 Expectation::GetBalance { id, ret } => {
                     let is_option = matches!(ret, Expr::Option(_));
@@ -615,8 +690,8 @@ impl ToRust for Expectation {
                             Option::from(ret)
                         }
                     };
-                    let address = id.to_rust(mode);
-                    let ret = ret.to_rust(mode);
+                    let address = id.to_rust(mode)?;
+                    let ret = ret.to_rust(mode)?;
 
                     quote! {
                         {
@@ -628,7 +703,21 @@ impl ToRust for Expectation {
                         }
                     }
                 }
-                Expectation::GetStateEntry { id, ret } => todo!(),
+                Expectation::GetStateEntry { id, ret } => {
+                    let id = id.to_rust(mode)?;
+                    let ret = ret.to_rust(mode)?;
+
+                    quote! {
+                        {
+                            expect_get_state_entry(
+                                tx_ctx,
+                                #id,
+                                #ret,
+                                None,
+                            );
+                        }
+                    }
+                }
                 Expectation::SetStateEntry { id, value } => todo!(),
                 Expectation::DeleteStateEntry { id } => todo!(),
                 Expectation::SetStateEntries { values } => {
@@ -636,6 +725,9 @@ impl ToRust for Expectation {
                         .into_iter()
                         .map(|(k, v)| (k.to_rust(mode), v.to_rust(mode)))
                         .unzip();
+
+                    let keys: Vec<_> = keys.into_iter().try_collect()?;
+                    let values: Vec<_> = values.into_iter().try_collect()?;
 
                     quote! {
                         expect_set_state_entries(
@@ -649,7 +741,7 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::GetSighash { sig } => {
-                    let sig = sig.to_rust(mode);
+                    let sig = sig.to_rust(mode)?;
 
                     quote! {
                         {
@@ -661,7 +753,7 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::GetGuid { guid } => {
-                    let guid = guid.to_rust(mode);
+                    let guid = guid.to_rust(mode)?;
                     quote! {
                         {
                             let guid = #guid.clone();
@@ -672,122 +764,262 @@ impl ToRust for Expectation {
                     }
                 }
             },
-            Mode::Integration => todo!(),
-        }
+            Mode::Integration => match self {
+                Expectation::SetStateEntry { id, value } => {
+                    let id = id.to_rust(mode)?;
+                    let value = value.to_rust(mode)?;
+
+                    quote! {
+                        {
+                            expect_set_state_entry(#id.to_string(), #value.into()).unwrap();
+                        }
+                    }
+                }
+                Expectation::SetStateEntries { values } => {
+                    let (keys, values): (Vec<_>, Vec<_>) = values
+                        .into_iter()
+                        .map(|(k, v)| (k.to_rust(mode), v.to_rust(mode)))
+                        .unzip();
+
+                    let keys: Vec<_> = keys.into_iter().try_collect()?;
+                    let values: Vec<_> = values.into_iter().try_collect()?;
+
+                    quote! {
+                        {
+                            expect_set_state_entries(
+                                ports,
+                                vec![
+                                    #(
+                                        (#keys.to_string(), #values.into())
+                                    ),*
+                                ]
+                            ).unwrap();
+                        }
+                    }
+                }
+                Expectation::DeleteStateEntry { id } => todo!(),
+                Expectation::GetBalance { .. }
+                | Expectation::GetStateEntry { .. }
+                | Expectation::GetSighash { .. }
+                | Expectation::GetGuid { .. } => quote! {},
+            },
+        })
     }
 }
 
-fn to_rust_code(descriptor: Descriptor, mode: Mode) {
-    if let Mode::Unit = mode {
-        let name = descriptor.name.to_snake_case().to_lowercase();
-        let test_name = format_ident!("{}", name);
+impl ToRust for Descriptor {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        let descriptor = self;
+        if let Mode::Unit = mode {
+            let name = descriptor.name.to_snake_case().to_lowercase();
+            let test_name = format_ident!("{}", name);
 
-        let imports = quote! {
-            use crate::handler::types::*;
-        };
+            let imports = quote! {
+                use crate::handler::types::*;
+            };
 
-        let fns = quote! {
-            fn wallet_with(balance: Option<impl Into<Integer> + Clone>) -> Option<Vec<u8>> {
-                balance.map(|b| {
-                    let wallet = crate::protos::Wallet {
-                        amount: b.into().to_string(),
-                    };
-                    let mut buf = Vec::with_capacity(wallet.encoded_len());
-                    wallet.encode(&mut buf).unwrap();
-                    buf
-                })
-            }
-        };
+            let fns = quote! {
+                fn wallet_with(balance: Option<impl Into<Integer> + Clone>) -> Option<Vec<u8>> {
+                    balance.map(|b| {
+                        let wallet = crate::protos::Wallet {
+                            amount: b.into().to_string(),
+                        };
+                        let mut buf = Vec::with_capacity(wallet.encoded_len());
+                        wallet.encode(&mut buf).unwrap();
+                        buf
+                    })
+                }
+            };
 
-        let sighashes = descriptor.sighashes.clone();
-        let sighash_ids: Vec<Ident> = sighashes.iter().map(|i| format_ident!("{}", i)).collect();
+            let sighashes = descriptor.sighashes.clone();
+            let sighash_ids: Vec<Ident> =
+                sighashes.iter().map(|i| format_ident!("{}", i)).collect();
 
-        let sighash_decls = quote! {
-            #(
-                let #sighash_ids = SigHash::from(#sighashes);
-            )*
-        };
-        let command = descriptor.command.to_rust(mode);
-        let command_decl = quote! {
-            let mut command = #command;
-        };
-        let tx_fee = descriptor.tx_fee;
-        let tx_fee_decl = if let Some(expr) = tx_fee {
-            let tx_fee = expr.to_rust(mode);
-            quote! {
-                let mut tx_fee = #tx_fee;
-            }
+            let sighash_decls = quote! {
+                #(
+                    let #sighash_ids = SigHash::from(#sighashes);
+                )*
+            };
+            let command = descriptor.command.to_rust(mode)?;
+            let command_decl = quote! {
+                let mut command = #command;
+            };
+            let tx_fee = descriptor.tx_fee;
+            let tx_fee_decl = if let Some(expr) = tx_fee {
+                let tx_fee = expr.to_rust(mode)?;
+                quote! {
+                    let mut tx_fee = #tx_fee;
+                }
+            } else {
+                quote! {
+                    let mut tx_fee = TX_FEE.clone();
+                }
+            };
+
+            let request = descriptor.request;
+            let request_decl = if let Some(expr) = request {
+                let request = expr.to_rust(mode)?;
+                quote! {
+                    let mut request = #request;
+                }
+            } else {
+                quote! {
+                    let mut request = TpProcessRequest::default();
+                }
+            };
+
+            let mock_setup = quote! {
+                let mut tx_ctx = MockTransactionContext::default();
+                let mut ctx = MockHandlerContext::default();
+
+            };
+
+            let stmts: Vec<_> = descriptor
+                .stmts
+                .into_iter()
+                .map(|f| ToRust::to_rust(f, mode))
+                .try_collect()?;
+
+            let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
+                let err = err.to_rust(mode)?;
+                quote! {
+                    execute_failure(command, &request, &tx_ctx, &mut ctx, #err);
+                }
+            } else {
+                quote! {
+                    execute_success(command, &request, &tx_ctx, &mut ctx);
+                }
+            };
+
+            let body = quote! {
+                #imports
+                #fns
+                #sighash_decls
+                #command_decl
+                #tx_fee_decl
+                #request_decl
+                #mock_setup
+
+                #( #stmts )*
+
+                #execute
+            };
+            let decl = quote! {
+                #[test]
+                #[allow(unused_variables, unused_parens, unused_imports, unused_mut, unused_braces)]
+                fn #test_name () {
+                    #body
+                }
+            };
+            Ok(decl)
         } else {
-            quote! {
-                let mut tx_fee = TX_FEE.clone();
-            }
-        };
+            let name = descriptor.name.to_snake_case().to_lowercase();
+            let test_name = format_ident!("{}", name);
 
-        let request = descriptor.request;
-        let request_decl = if let Some(expr) = request {
-            let request = expr.to_rust(mode);
-            quote! {
-                let mut request = #request;
-            }
-        } else {
-            quote! {
-                let mut request = TpProcessRequest::default();
-            }
-        };
+            let imports = quote! {
+                use rug::Integer;
+                use ccprocessor_rust::handler::*;
+                use ccprocessor_rust::ext::*;
+                use ccprocessor_rust::handler::types::*;
+                use prost::Message as _;
+                use protobuf::Message as _;
+            };
 
-        let mock_setup = quote! {
-            let mut tx_ctx = MockTransactionContext::default();
-            let mut ctx = MockHandlerContext::default();
+            let fns = quote! {
+                fn wallet_with(balance: Option<impl Into<Integer> + Clone>) -> Option<Vec<u8>> {
+                    balance.map(|b| {
+                        let wallet = ccprocessor_rust::protos::Wallet {
+                            amount: b.into().to_string(),
+                        };
+                        let mut buf = Vec::with_capacity(wallet.encoded_len());
+                        wallet.encode(&mut buf).unwrap();
+                        buf
+                    })
+                }
+            };
 
-        };
+            let sighashes = descriptor.sighashes.clone();
+            let sighash_ids: Vec<Ident> =
+                sighashes.iter().map(|i| format_ident!("{}", i)).collect();
 
-        let stmts = descriptor
-            .stmts
-            .into_iter()
-            .map(|f| ToRust::to_rust(f, mode));
+            let sighash_decls = quote! {
+                #(
+                    let #sighash_ids = SigHash::from(#sighashes);
+                )*
+            };
+            let command = descriptor.command.to_rust(mode)?;
+            let command_decl = quote! {
+                let mut command = #command;
+            };
+            let tx_fee = descriptor.tx_fee;
+            let tx_fee_decl = if let Some(expr) = tx_fee {
+                let tx_fee = expr.to_rust(mode)?;
+                quote! {
+                    let mut tx_fee = #tx_fee;
+                }
+            } else {
+                quote! {
+                    let mut tx_fee = ccprocessor_rust::handler::constants::TX_FEE.clone();
+                }
+            };
 
-        let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
-            let err = err.to_rust(mode);
-            quote! {
-                execute_failure(command, &request, &tx_ctx, &mut ctx, #err);
-            }
-        } else {
-            quote! {
-                execute_success(command, &request, &tx_ctx, &mut ctx);
-            }
-        };
+            let stmts: Vec<_> = descriptor
+                .stmts
+                .into_iter()
+                .map(|f| ToRust::to_rust(f, mode))
+                .try_collect()?;
 
-        let body = quote! {
-            #imports
-            #fns
-            #sighash_decls
-            #command_decl
-            #tx_fee_decl
-            #request_decl
-            #mock_setup
+            let cmd = "command";
+            let guid = command_to_guid(cmd);
+            let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
+                let err = err.to_rust(mode)?;
+                quote! {
+                    execute_failure(command, #err, Some(Nonce::from(#guid)));
+                }
+            } else {
+                quote! {
+                    execute_success(command, ports, Some(Nonce::from(#guid)));
+                }
+            };
 
-            #( #stmts )*
+            let head = quote! {
+                #imports
+                #fns
+                setup_logs();
 
-            #execute
-        };
-        let decl = quote! {
-            #[test]
-            #[allow(unused_variables, unused_parens, unused_imports, unused_mut, unused_braces)]
-            fn #test_name () {
-                #body
-            }
-        };
-        println!("\n{}", decl);
-    } else {
+            };
+            let body = quote! {
+                #sighash_decls
+                #command_decl
+                #tx_fee_decl
+
+                #( #stmts )*
+
+                #execute
+            };
+            let decl = quote! {
+                #[test]
+                #[allow(unused_variables, unused_parens, unused_imports, unused_mut, unused_braces, dead_code)]
+                fn #test_name () {
+                    #head
+                    integration_test(|ports| {
+                        #body
+                    });
+                }
+            };
+            println!("\n{}", decl);
+
+            Ok(decl)
+        }
     }
 }
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let contents = fs::read_to_string("test-description2")?;
+    let contents = fs::read_to_string("test-descriptions")?;
     let result = DescriptorParser::parse(Rule::descriptor, &contents)?;
     let descriptor = parse_descriptor(result)?;
     // println!("{:?}", descriptor);
-    to_rust_code(descriptor, Mode::Unit);
+    let rust = descriptor.to_rust(Mode::Integration)?;
     Ok(())
 }

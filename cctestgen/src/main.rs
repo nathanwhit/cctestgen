@@ -56,6 +56,7 @@ pub struct Descriptor {
     name: String,
     sighashes: Vec<String>,
     command: Command,
+    signer: Expr,
     tx_fee: Option<Expr>,
     pass_fail: TestKind,
     stmts: Vec<Stmt>,
@@ -119,6 +120,7 @@ pub enum Expr {
     Literal(Literal),
     WalletId(Ident),
     GuidFor(Ident),
+    SignerFor(Ident),
     Option(Option<Box<Expr>>),
 }
 
@@ -212,6 +214,9 @@ impl ParseAst for Expr {
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
             Rule::guid_for => Ok(Expr::GuidFor(syn::parse_str(
+                expr.into_inner().next().expecting(Rule::ident)?.as_str(),
+            )?)),
+            Rule::signer_for => Ok(Expr::SignerFor(syn::parse_str(
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
             Rule::default => Ok(Expr::Default),
@@ -395,6 +400,10 @@ impl ToRust for Command {
     }
 }
 
+fn sig_to_signer(sig: impl IdentFragment) -> Ident {
+    format_ident!("_{}_signer", sig)
+}
+
 fn parse_descriptor(mut pairs: Pairs<Rule>) -> Result<Descriptor> {
     let mut name = String::new();
     let mut sighashes = vec![];
@@ -403,6 +412,7 @@ fn parse_descriptor(mut pairs: Pairs<Rule>) -> Result<Descriptor> {
     let mut pass_fail = TestKind::Pass;
     let mut stmts = Vec::new();
     let mut request = None;
+    let mut signer = None;
 
     let meta = pairs.next().unwrap();
     for m in meta.into_inner() {
@@ -451,6 +461,10 @@ fn parse_descriptor(mut pairs: Pairs<Rule>) -> Result<Descriptor> {
                 let expr = Expr::parse(m.into_inner().next())?;
                 request = Some(expr);
             }
+            Rule::signer => {
+                let expr = Expr::parse(m.into_inner().next())?;
+                signer = Some(expr);
+            }
             foo => panic!("Unexpected rule {:?}", foo),
         }
     }
@@ -467,6 +481,7 @@ fn parse_descriptor(mut pairs: Pairs<Rule>) -> Result<Descriptor> {
         name,
         sighashes,
         command: command.unwrap(),
+        signer: signer.unwrap(),
         tx_fee,
         pass_fail,
         stmts,
@@ -558,6 +573,15 @@ impl ToRust for Expr {
                     { #guid.clone() }
                 }
             }
+            Expr::SignerFor(sig) => match mode {
+                Mode::Unit => quote! {},
+                Mode::Integration => {
+                    let signer = sig_to_signer(sig);
+                    quote! {
+                        #signer
+                    }
+                }
+            },
         })
     }
 }
@@ -646,17 +670,24 @@ impl ToRust for Requirement {
                     sighash: Sighash(sig),
                     amount,
                 } => {
+                    use rand::Rng;
                     let id = sig_to_walletid(&sig);
                     let sig = format_ident!("{}", sig);
                     let amount = amount.to_rust(mode)?;
+                    let signer = sig_to_signer(sig.clone());
+                    let random_tx_id: String = rand::thread_rng()
+                        .sample_iter(rand::distributions::Alphanumeric)
+                        .map(char::from)
+                        .take(15)
+                        .collect();
                     quote! {
                         {
                             let collect_coins = ccprocessor_rust::handler::CollectCoins {
                                 amount: { #amount.into() },
                                 eth_address: "dummy".into(),
-                                blockchain_tx_id: "setup".into(),
+                                blockchain_tx_id: #random_tx_id.into(),
                             };
-                            let response = send_command(collect_coins, ports, None);
+                            let response = send_command_with_signer(collect_coins, ports, None, &#signer);
                             assert!(matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed)));
 
                         }
@@ -807,6 +838,13 @@ impl ToRust for Expectation {
     }
 }
 
+fn new_secret() -> String {
+    use libsecp256k1::SecretKey;
+    let mut rng = rand::thread_rng();
+    let secret = SecretKey::random(&mut rng);
+    format!("{:x}", secret)
+}
+
 impl ToRust for Descriptor {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         let descriptor = self;
@@ -941,10 +979,12 @@ impl ToRust for Descriptor {
             let sighashes = descriptor.sighashes.clone();
             let sighash_ids: Vec<Ident> =
                 sighashes.iter().map(|i| format_ident!("{}", i)).collect();
-
+            let signers: Vec<Ident> = sighashes.iter().map(sig_to_signer).collect();
+            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret()).collect();
             let sighash_decls = quote! {
                 #(
-                    let #sighash_ids = SigHash::from(#sighashes);
+                    let #signers = signer_with_secret(#secrets);
+                    let #sighash_ids = SigHash::from(&#signers);
                 )*
             };
             let command = descriptor.command.to_rust(mode)?;
@@ -963,22 +1003,29 @@ impl ToRust for Descriptor {
                 }
             };
 
-            let stmts: Vec<_> = descriptor
+            let (expectations, stmts): (Vec<_>, Vec<_>) = descriptor
                 .stmts
+                .into_iter()
+                .partition(|s| matches!(s, Stmt::Expect { .. }));
+            let expectations: Vec<_> = expectations
                 .into_iter()
                 .map(|f| ToRust::to_rust(f, mode))
                 .try_collect()?;
-
+            let stmts: Vec<_> = stmts
+                .into_iter()
+                .map(|f| ToRust::to_rust(f, mode))
+                .try_collect()?;
             let cmd = "command";
             let guid = command_to_guid(cmd);
+            let signer = descriptor.signer.to_rust(mode)?;
             let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
                 let err = err.to_rust(mode)?;
                 quote! {
-                    execute_failure(command, #err, Some(Nonce::from(#guid)));
+                    execute_failure(command, #err, ports, Some(Nonce::from(#guid)), &#signer);
                 }
             } else {
                 quote! {
-                    execute_success(command, ports, Some(Nonce::from(#guid)));
+                    execute_success(command, ports, Some(Nonce::from(#guid)), &#signer);
                 }
             };
 
@@ -996,6 +1043,8 @@ impl ToRust for Descriptor {
                 #( #stmts )*
 
                 #execute
+
+                #( #expectations )*
             };
             let decl = quote! {
                 #[test]
@@ -1007,8 +1056,6 @@ impl ToRust for Descriptor {
                     });
                 }
             };
-            println!("\n{}", decl);
-
             Ok(decl)
         }
     }
@@ -1016,10 +1063,11 @@ impl ToRust for Descriptor {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let contents = fs::read_to_string("test-descriptions")?;
+    let contents = fs::read_to_string("test-description2")?;
     let result = DescriptorParser::parse(Rule::descriptor, &contents)?;
     let descriptor = parse_descriptor(result)?;
     // println!("{:?}", descriptor);
-    let rust = descriptor.to_rust(Mode::Integration)?;
+    let rust = descriptor.to_rust(Mode::Unit)?;
+    println!("\n{}", rust);
     Ok(())
 }

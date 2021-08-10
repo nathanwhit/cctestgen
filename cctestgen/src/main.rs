@@ -7,19 +7,12 @@ use gen::{Mode, ToRust};
 use std::{convert::TryFrom, fs};
 
 use clap::Arg;
-use color_eyre::{Result};
+use color_eyre::Result;
 
-
-use pest::{
-    Parser,
-};
-
-
-
-
+use pest::Parser;
 
 pub mod parse {
-    
+
     use pest_derive::Parser;
 
     #[derive(Parser)]
@@ -61,7 +54,14 @@ fn main() -> Result<()> {
         let rust = descriptor.to_rust(mode)?;
         code.push(rust);
     }
-    println!("use super::*;");
+    if let Mode::Unit = mode {
+        println!("use super::*;");
+    } else {
+        println!(r##"#![cfg(feature = "integration-testing")]"##);
+
+        println!("mod common;");
+        println!("use common::*;");
+    }
     for c in code {
         println!("\n{}", c);
     }

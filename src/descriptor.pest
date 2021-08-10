@@ -2,47 +2,46 @@ WHITESPACE = _{ " " | "\r" | "\n" | "\t" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!("\r" | "\n") ~ ANY)*)}
 
 descriptors = { SOI ~ descriptor ~ ("---" ~ descriptor)* ~ EOI}
-descriptor = { meta ~ (statement+) }
+descriptor = { top_statement+ }
+top_statement = _ { meta | statement }
 statement = {
-    (binding ~ ";") |
-    (require ~ ";") |
-    (expect ~ ";")  |
-    unit            |
-    integration     | 
-    rustcode
+    stmt ~ ";"?
 }
+stmt = _{ binding | require | expect | unit | integration | rustcode }
 unit = { "unit" ~ "{" ~ statement* ~ "}" }
 integration = { "integration" ~ "{" ~ statement* ~ "}" }
 binding = { "let" ~ ident ~ "=" ~ expr }
 meta = {
-    (testname | sighashes | command | tx_fee | test_type | request | signer)+
+    meta_inner ~ ";"?
 }
+meta_inner = _{  (testname | sighashes | command | tx_fee | test_type | request | signer) }
 testname = {
-    "name" ~ "=" ~ string ~ ";"
+    "name" ~ "=" ~ string
 }
 sighashes = {
-    "sighashes" ~ "=" ~ (("[" ~ "]") | ("[" ~ ident ~ ("," ~ ident)* ~ "]")) ~ ";"
+    "sighashes" ~ "=" ~ (("[" ~ "]") | ("[" ~ ident ~ ("," ~ ident)* ~ "]"))
 }
 command = {
-    "command" ~ "=" ~ constructor ~ ";"
+    "command" ~ "=" ~ constructor
 }
 signer = {
-    "signer" ~ "=" ~ expr ~ ";"
+    "signer" ~ "=" ~ expr
 }
 tx_fee = {
-    "tx_fee" ~ "=" ~ expr ~ ";"
+    "tx_fee" ~ "=" ~ expr
 }
 request = {
-    "request" ~ "=" ~ expr ~ ";"
+    "request" ~ "=" ~ expr
 }
-test_type = _{ "result" ~ "=" ~ passfail ~ ";" }
+test_type = _{ "result" ~ "=" ~ passfail }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
-non_method_expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
+expr = { method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident | expr_block }
+non_method_expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident | expr_block }
+expr_block = { "{" ~ expr ~ "}" } 
 method_call = { non_method_expr ~ calls }
 calls = { ("." ~ ident ~ ("(" ~ ")")?)+ }
 default = { "default" }
-literal = { string | number | array | mapping | option }
+literal = { string | number | array | option }
 option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
 field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
@@ -54,9 +53,10 @@ rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
 code = ${  (!("{" | "}") ~ ANY  | block)* }
 block = { "{" ~ code ~ "}" }
 require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
-requirement = { wallet | guid }
+requirement = { wallet | guid | send_tx }
 guid = { "Guid" ~ "for" ~ ident }
 wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
+send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr}
 expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
 expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid }
 get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }

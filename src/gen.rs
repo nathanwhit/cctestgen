@@ -5,7 +5,7 @@ use color_eyre::Result;
 use inflector::Inflector;
 use itertools::Itertools;
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, IdentFragment};
+use quote::{format_ident, quote, IdentFragment, ToTokens};
 use syn::Ident;
 
 use super::ast::*;
@@ -43,7 +43,7 @@ fn sig_to_signer(sig: impl IdentFragment) -> Ident {
     format_ident!("_{}_signer", sig)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
     Integration,
     Unit,
@@ -63,6 +63,23 @@ impl TryFrom<&str> for Mode {
 
 pub trait ToRust {
     fn to_rust(self, mode: Mode) -> Result<TokenStream>;
+}
+
+impl ToRust for syn::Path {
+    fn to_rust(mut self, mode: Mode) -> Result<TokenStream> {
+        match mode {
+            Mode::Unit => Ok(self.to_token_stream()),
+            Mode::Integration => {
+                for segment in &mut self.segments {
+                    eprintln!("{}", segment.ident);
+                    if segment.ident == "crate" {
+                        segment.ident = format_ident!("ccprocessor_rust");
+                    }
+                }
+                Ok(self.to_token_stream())
+            }
+        }
+    }
 }
 
 impl ToRust for Expr {
@@ -92,6 +109,7 @@ impl ToRust for Expr {
                 { #ident.clone() }
             },
             Expr::Construction { name, fields } => {
+                let name = name.to_rust(mode)?;
                 let fields = fields
                     .into_iter()
                     .map(|f| ToRust::to_rust(f, mode))
@@ -162,6 +180,19 @@ impl ToRust for Expr {
     }
 }
 
+impl ToRust for Vec<Stmt> {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        let stmts: Vec<_> = self.into_iter().map(|s| s.to_rust(mode)).try_collect()?;
+        Ok(quote! {
+            {
+                #(
+                    #stmts
+                )*
+            }
+        })
+    }
+}
+
 impl ToRust for Stmt {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         Ok(match self {
@@ -208,6 +239,13 @@ impl ToRust for Stmt {
                     { #ts }
                 }
             }
+            Stmt::ModeSpecific { mode: m, stmts } => {
+                if mode == m {
+                    stmts.to_rust(mode)?
+                } else {
+                    quote! {}
+                }
+            }
         })
     }
 }
@@ -240,6 +278,7 @@ impl ToRust for Requirement {
                         let #id = Guid("some_guid".into());
                     }
                 }
+                Requirement::SendTx { .. } => quote! {},
             },
             Mode::Integration => match self {
                 Requirement::Wallet {
@@ -274,6 +313,17 @@ impl ToRust for Requirement {
                     let id = command_to_guid(&id);
                     quote! {
                         let #id = Guid::from(make_nonce());
+                    }
+                }
+                Requirement::SendTx { tx, signer } => {
+                    let tx = tx.to_rust(mode)?;
+                    let signer = signer.to_rust(mode)?;
+                    quote! {
+                        {
+                            let tx = #tx;
+                            let response = send_command_with_signer(tx, ports, None, &#signer);
+                            assert!(matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed)));
+                        }
                     }
                 }
             },
@@ -494,10 +544,6 @@ impl ToRust for Descriptor {
                     let #sighash_ids = SigHash::from(&#signers);
                 )*
             };
-            let command = descriptor.command.to_rust(mode)?;
-            let command_decl = quote! {
-                let mut command = #command;
-            };
             let tx_fee = descriptor.tx_fee;
             let tx_fee_decl = if let Some(expr) = tx_fee {
                 let tx_fee = expr.to_rust(mode)?;
@@ -549,7 +595,6 @@ impl ToRust for Descriptor {
                 #imports
                 #fns
                 #sighash_decls
-                #command_decl
                 #tx_fee_decl
                 #request_decl
                 #mock_setup
@@ -592,10 +637,6 @@ impl ToRust for Descriptor {
                     let #sighash_ids = SigHash::from(&#signers);
                 )*
             };
-            let command = descriptor.command.to_rust(mode)?;
-            let command_decl = quote! {
-                let mut command = #command;
-            };
             let tx_fee = descriptor.tx_fee;
             let tx_fee_decl = if let Some(expr) = tx_fee {
                 let tx_fee = expr.to_rust(mode)?;
@@ -620,9 +661,9 @@ impl ToRust for Descriptor {
                 .into_iter()
                 .map(|f| ToRust::to_rust(f, mode))
                 .try_collect()?;
-            let cmd = "command";
-            let guid = command_to_guid(cmd);
+
             let signer = descriptor.signer.to_rust(mode)?;
+            let guid = command_to_guid("command");
             let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
                 let err = err.to_rust(mode)?;
                 quote! {
@@ -642,7 +683,6 @@ impl ToRust for Descriptor {
             };
             let body = quote! {
                 #sighash_decls
-                #command_decl
                 #tx_fee_decl
 
                 #( #stmts )*

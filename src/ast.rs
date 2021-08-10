@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use crate::gen::Mode;
+
 use super::parse::Rule;
 
 use color_eyre::{eyre::eyre, Result};
@@ -8,6 +10,7 @@ use pest::iterators::Pair;
 
 use proc_macro2::{Ident, Literal};
 
+use quote::format_ident;
 use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
 use syn::Path;
 
@@ -48,7 +51,6 @@ pub enum TestKind {
 pub struct Descriptor {
     pub name: String,
     pub sighashes: Vec<String>,
-    pub command: Command,
     pub signer: Expr,
     pub tx_fee: Option<Expr>,
     pub pass_fail: TestKind,
@@ -168,6 +170,7 @@ impl Default for Expr {
 pub enum Requirement {
     Wallet { sighash: Sighash, amount: Expr },
     Guid { id: Ident },
+    SendTx { tx: Expr, signer: Expr },
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +190,7 @@ pub enum Stmt {
     Require { requirements: Vec<Requirement> },
     Expect { expectations: Vec<Expectation> },
     RustCode(String),
+    ModeSpecific { mode: Mode, stmts: Vec<Stmt> },
 }
 
 pub trait ParseAst: Sized {
@@ -238,7 +242,7 @@ impl ParseAst for Expr {
             }
             Rule::constructor => {
                 let mut inner = expr.into_inner();
-                let name = syn::parse_str(inner.next().expecting(Rule::path)?.as_str())?;
+                let name: syn::Path = syn::parse_str(inner.next().expecting(Rule::path)?.as_str())?;
                 let fields = Fields::parse(inner.next())?;
                 Ok(Expr::Construction { name, fields })
             }
@@ -259,6 +263,7 @@ impl ParseAst for Expr {
                 let methods = inner.next().expecting(Rule::calls)?.as_str().into();
                 Ok(Expr::MethodCall { value, methods })
             }
+            Rule::expr_block => Ok(Expr::parse(expr.into_inner().next())?),
             foo => unreachable!("Bad, we got a {:?}", foo),
         }
     }
@@ -367,6 +372,12 @@ impl ParseAst for Requirement {
                 let id = syn::parse_str(inner.next().expecting(Rule::ident)?.as_str())?;
                 Ok(Requirement::Guid { id })
             }
+            Rule::send_tx => {
+                let mut inner = req.into_inner();
+                let tx = Expr::parse(inner.next())?;
+                let signer = Expr::parse(inner.next())?;
+                Ok(Requirement::SendTx { tx, signer })
+            }
             _ => unreachable!(),
         }
     }
@@ -452,6 +463,28 @@ impl ParseAst for Stmt {
                 let code = next.as_str();
                 Ok(Stmt::RustCode(code.into()))
             }
+            Rule::integration => {
+                let inner = next.into_inner();
+                let mut stmts = Vec::new();
+                for pair in inner {
+                    stmts.push(Stmt::parse(pair)?);
+                }
+                Ok(Stmt::ModeSpecific {
+                    mode: Mode::Integration,
+                    stmts,
+                })
+            }
+            Rule::unit => {
+                let inner = next.into_inner();
+                let mut stmts = Vec::new();
+                for pair in inner {
+                    stmts.push(Stmt::parse(pair)?);
+                }
+                Ok(Stmt::ModeSpecific {
+                    mode: Mode::Unit,
+                    stmts,
+                })
+            }
             _ => unreachable!(),
         }
     }
@@ -460,84 +493,90 @@ impl ParseAst for Stmt {
 impl ParseAst for Descriptor {
     fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
         let pair = pair.expecting(Rule::descriptor)?;
-        let mut pairs = pair.into_inner();
+        let pairs = pair.into_inner();
 
-        let mut name = String::new();
+        let mut name = None;
         let mut sighashes = vec![];
-        let mut command = None;
         let mut tx_fee = None;
         let mut pass_fail = TestKind::Pass;
         let mut stmts = Vec::new();
         let mut request = None;
         let mut signer = None;
 
-        let meta = pairs.next().expecting(Rule::meta)?;
-        for m in meta.into_inner() {
-            match m.as_rule() {
-                Rule::testname => {
-                    let mut inner = m.into_inner();
-                    let value = inner.next().expecting(Rule::string)?;
-                    let value = value.into_inner().next().expecting(Rule::inner)?;
-                    name = value.as_str().to_owned();
-                }
-                Rule::sighashes => {
-                    let arr = m.into_inner();
-                    for id in arr {
-                        let id = id.expecting(Rule::ident)?;
-                        sighashes.push(id.as_str().to_owned());
-                    }
-                }
-                Rule::command => {
-                    let construct = m.into_inner().next().expecting(Rule::constructor)?;
-                    let mut parts = construct.into_inner();
-                    let name = parts.next().expecting(Rule::path)?;
-                    let mapping = parts.next().expecting(Rule::struct_map)?;
-                    let fields = Fields::parse(mapping)?;
-                    let name = name.as_str().into();
-                    command = Some(Command { fields, name })
-                }
-                Rule::tx_fee => {
-                    let expr = m.into_inner().next().expecting(Rule::expr)?;
-                    let value = Expr::parse(expr)?;
-                    tx_fee = Some(value);
-                }
-                Rule::passfail => {
-                    let mut inner = m.into_inner();
-                    match inner.next() {
-                        Some(pair) => {
-                            let expected = pair.expecting(Rule::expr)?;
-                            let expr = Expr::parse(expected)?;
-                            pass_fail = TestKind::Fail(expr);
-                        }
-                        None => {
-                            pass_fail = TestKind::Pass;
-                        }
-                    }
-                }
-                Rule::request => {
-                    let expr = Expr::parse(m.into_inner().next())?;
-                    request = Some(expr);
-                }
-                Rule::signer => {
-                    let expr = Expr::parse(m.into_inner().next())?;
-                    signer = Some(expr);
-                }
-                foo => panic!("Unexpected rule {:?}", foo),
-            }
-        }
         for pair in pairs {
             if let Rule::statement = pair.as_rule() {
                 stmts.push(Stmt::parse(pair)?);
             } else if let Rule::EOI = pair.as_rule() {
                 break;
+            } else if let Rule::meta = pair.as_rule() {
+                for m in pair.into_inner() {
+                    match m.as_rule() {
+                        Rule::testname => {
+                            let mut inner = m.into_inner();
+                            let value = inner.next().expecting(Rule::string)?;
+                            let value = value.into_inner().next().expecting(Rule::inner)?;
+                            name = Some(value.as_str().to_owned());
+                        }
+                        Rule::sighashes => {
+                            let arr = m.into_inner();
+                            for id in arr {
+                                let id = id.expecting(Rule::ident)?;
+                                sighashes.push(id.as_str().to_owned());
+                            }
+                        }
+                        Rule::command => {
+                            let construct = m.into_inner().next().expecting(Rule::constructor)?;
+                            let mut parts = construct.into_inner();
+                            let name = parts.next().expecting(Rule::path)?;
+                            let mapping = parts.next().expecting(Rule::struct_map)?;
+                            let fields = Fields::parse(mapping)?;
+                            let name = syn::parse_str(name.as_str())?;
+                            stmts.push(Stmt::Binding {
+                                name: "command".to_string(),
+                                value: Expr::Construction { name, fields },
+                            });
+                            stmts.push(Stmt::Require {
+                                requirements: vec![Requirement::Guid {
+                                    id: format_ident!("{}", "command"),
+                                }],
+                            })
+                        }
+                        Rule::tx_fee => {
+                            let expr = m.into_inner().next().expecting(Rule::expr)?;
+                            let value = Expr::parse(expr)?;
+                            tx_fee = Some(value);
+                        }
+                        Rule::passfail => {
+                            let mut inner = m.into_inner();
+                            match inner.next() {
+                                Some(pair) => {
+                                    let expected = pair.expecting(Rule::expr)?;
+                                    let expr = Expr::parse(expected)?;
+                                    pass_fail = TestKind::Fail(expr);
+                                }
+                                None => {
+                                    pass_fail = TestKind::Pass;
+                                }
+                            }
+                        }
+                        Rule::request => {
+                            let expr = Expr::parse(m.into_inner().next())?;
+                            request = Some(expr);
+                        }
+                        Rule::signer => {
+                            let expr = Expr::parse(m.into_inner().next())?;
+                            signer = Some(expr);
+                        }
+                        other => panic!("Unexpected rule {:?}", other),
+                    }
+                }
             } else {
-                panic!("Bad {:?}", pair)
+                panic!("Bad {:?}", pair);
             }
         }
         Ok(Descriptor {
-            name,
+            name: name.ok_or_else(|| eyre!("Must specify the name of the test"))?,
             sighashes,
-            command: command.unwrap(),
             signer: signer.ok_or_else(|| eyre!("Must specify the signer of the command"))?,
             tx_fee,
             pass_fail,

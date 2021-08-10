@@ -40,7 +40,7 @@ passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
 expr = { method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
 non_method_expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
 method_call = { non_method_expr ~ calls }
-calls = { ("." ~ ident ~ "(" ~ ")")+ }
+calls = { ("." ~ ident ~ ("(" ~ ")")?)+ }
 default = { "default" }
 literal = { string | number | array | mapping | option }
 option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
@@ -68,8 +68,8 @@ get_guid = { "guid" ~ "->" ~ expr }
 delete_state = { "delete" ~ "state" ~ "at" ~ expr }
 
 
-
-constructor = { ident ~ struct_map }
+path = { ident ~ ("::" ~ ident)* }
+constructor = { path ~ struct_map }
 struct_map = {
     ("{" ~ "}") |
     ("{" ~ struct_pair ~ ("," ~ struct_pair)* ~ ","? ~ "}")

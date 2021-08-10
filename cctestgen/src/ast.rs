@@ -9,6 +9,7 @@ use pest::iterators::Pair;
 use proc_macro2::{Ident, Literal};
 
 use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
+use syn::Path;
 
 #[derive(Debug, Clone, Copy, AsRefStr, IntoStaticStr, EnumString)]
 
@@ -33,7 +34,7 @@ pub enum CommandKind {
 
 #[derive(Debug, Clone)]
 pub struct Command {
-    pub kind: CommandKind,
+    pub name: String,
     pub fields: Fields,
 }
 
@@ -136,7 +137,7 @@ pub enum Expr {
     Sighash(Sighash),
     Default,
     Ident(Ident),
-    Construction { name: Ident, fields: Fields },
+    Construction { name: Path, fields: Fields },
     Array(Vec<Expr>),
     Mapping(Mapping),
     Literal(Literal),
@@ -237,7 +238,7 @@ impl ParseAst for Expr {
             }
             Rule::constructor => {
                 let mut inner = expr.into_inner();
-                let name = syn::parse_str(inner.next().expecting(Rule::ident)?.as_str())?;
+                let name = syn::parse_str(inner.next().expecting(Rule::path)?.as_str())?;
                 let fields = Fields::parse(inner.next())?;
                 Ok(Expr::Construction { name, fields })
             }
@@ -489,11 +490,11 @@ impl ParseAst for Descriptor {
                 Rule::command => {
                     let construct = m.into_inner().next().expecting(Rule::constructor)?;
                     let mut parts = construct.into_inner();
-                    let name = parts.next().expecting(Rule::ident)?;
+                    let name = parts.next().expecting(Rule::path)?;
                     let mapping = parts.next().expecting(Rule::struct_map)?;
                     let fields = Fields::parse(mapping)?;
-                    let kind = name.as_str().parse::<CommandKind>()?;
-                    command = Some(Command { fields, kind })
+                    let name = name.as_str().into();
+                    command = Some(Command { fields, name })
                 }
                 Rule::tx_fee => {
                     let expr = m.into_inner().next().expecting(Rule::expr)?;

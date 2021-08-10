@@ -1,5 +1,6 @@
-use std::{fs, str::FromStr};
+use std::{convert::TryFrom, fs, str::FromStr};
 
+use clap::Arg;
 use color_eyre::{eyre::eyre, Result};
 use inflector::Inflector;
 use itertools::Itertools;
@@ -15,8 +16,6 @@ use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
 #[derive(Parser)]
 #[grammar = "descriptor.pest"]
 struct DescriptorParser;
-
-type Fields = Vec<Field>;
 
 #[derive(Debug, Clone, Copy, AsRefStr, IntoStaticStr, EnumString)]
 
@@ -65,9 +64,23 @@ pub struct Descriptor {
 
 pub trait PairExt<Inner = Self> {
     fn expecting(self, rule: Rule) -> Result<Inner>;
+
+    fn expecting_one_of(self, rules: &[Rule]) -> Result<Inner>;
 }
 
 impl PairExt for Pair<'_, Rule> {
+    fn expecting_one_of(self, rules: &[Rule]) -> Result<Self> {
+        for rule in rules {
+            if self.as_rule() == *rule {
+                return Ok(self);
+            }
+        }
+        Err(eyre!(
+            "expected one of {:?} but found {:?}",
+            rules,
+            self.as_rule()
+        ))
+    }
     fn expecting(self, rule: Rule) -> Result<Self> {
         if self.as_rule() == rule {
             Ok(self)
@@ -90,12 +103,38 @@ impl<'a> PairExt<Pair<'a, Rule>> for Option<Pair<'a, Rule>> {
             None => Err(eyre!("expected a pair but found None")),
         }
     }
+    fn expecting_one_of(self, rules: &[Rule]) -> Result<Pair<'a, Rule>> {
+        match self {
+            Some(p) => {
+                for rule in rules {
+                    if p.as_rule() == *rule {
+                        return Ok(p);
+                    }
+                }
+                Err(eyre!(
+                    "expected one of {:?} but found {:?}",
+                    rules,
+                    p.as_rule()
+                ))
+            }
+            None => Err(eyre!("expected a pair but found None")),
+        }
+    }
 }
+
+type Fields = Vec<StructEntry>;
 
 #[derive(Debug, Clone)]
 pub struct Field {
     name: Ident,
-    value: Box<Expr>,
+    value: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub enum StructEntry {
+    Pair(Field),
+    Single(Expr),
+    Update(Expr),
 }
 
 impl ToRust for Field {
@@ -122,9 +161,15 @@ pub enum Expr {
     GuidFor(Ident),
     SignerFor(Ident),
     Option(Option<Box<Expr>>),
+    MethodCall { value: Box<Expr>, methods: String },
 }
 
-pub type Mapping = Vec<(Expr, Expr)>;
+#[derive(Debug, Clone)]
+pub enum MapEntry {
+    Pair(Expr, Expr),
+    Single(Expr),
+}
+pub type Mapping = Vec<MapEntry>;
 
 #[derive(Debug, Clone)]
 pub struct Sighash(String);
@@ -166,7 +211,11 @@ pub trait ParseAst: Sized {
 
 impl ParseAst for Expr {
     fn parse<'a>(expr: impl PairExt<Pair<'a, Rule>>) -> Result<Expr> {
-        let expr = expr.expecting(Rule::expr)?.into_inner().next().unwrap();
+        let expr = expr
+            .expecting_one_of(&[Rule::expr, Rule::non_method_expr])?
+            .into_inner()
+            .next()
+            .unwrap();
 
         match expr.as_rule() {
             Rule::code => {
@@ -220,7 +269,41 @@ impl ParseAst for Expr {
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
             Rule::default => Ok(Expr::Default),
+            Rule::method_call => {
+                let mut inner = expr.into_inner();
+                let value = Box::new(Expr::parse(inner.next())?);
+                let methods = inner.next().expecting(Rule::calls)?.as_str().into();
+                Ok(Expr::MethodCall { value, methods })
+            }
             foo => unreachable!("Bad, we got a {:?}", foo),
+        }
+    }
+}
+
+impl ParseAst for StructEntry {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting(Rule::struct_pair)?;
+        let mut inner = pair.into_inner();
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::field_pair => {
+                let mut parts = first.into_inner();
+                let name = parts.next().expecting(Rule::ident)?;
+                let value = Expr::parse(parts.next())?;
+                Ok(Self::Pair(Field {
+                    name: syn::parse_str(name.as_str())?,
+                    value,
+                }))
+            }
+            Rule::update => {
+                let value = Expr::parse(first.into_inner().next())?;
+                Ok(Self::Update(value))
+            }
+            Rule::short => {
+                let value = Expr::parse(first.into_inner().next())?;
+                Ok(Self::Single(value))
+            }
+            other => unreachable!("bad rule in struct entry: {:?}", other),
         }
     }
 }
@@ -230,14 +313,7 @@ impl ParseAst for Fields {
         let mapping = pair.expecting(Rule::struct_map)?;
         let mut fields = vec![];
         for pair in mapping.into_inner() {
-            let pair = pair.expecting(Rule::struct_pair)?;
-            let mut parts = pair.into_inner();
-            let name = parts.next().expecting(Rule::ident)?;
-            let value = Expr::parse(parts.next())?;
-            fields.push(Field {
-                name: syn::parse_str(name.as_str())?,
-                value: Box::new(value),
-            });
+            fields.push(StructEntry::parse(pair)?);
         }
         Ok(fields)
     }
@@ -248,13 +324,29 @@ impl ParseAst for Mapping {
         let mapping = pair.expecting(Rule::mapping)?;
         let mut items = Mapping::new();
         for pair in mapping.into_inner() {
-            let pair = pair.expecting(Rule::pair)?;
-            let mut parts = pair.into_inner();
-            let key = Expr::parse(parts.next())?;
-            let value = Expr::parse(parts.next())?;
-            items.push((key, value));
+            items.push(MapEntry::parse(pair)?);
         }
         Ok(items)
+    }
+}
+
+impl ParseAst for MapEntry {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let entry = pair.expecting(Rule::pair)?;
+        let mut inner = entry.into_inner();
+        let e = inner.next().ok_or_else(|| eyre!("expected item"))?;
+        match e.as_rule() {
+            Rule::expr => {
+                let key = Expr::parse(e)?;
+                let value = Expr::parse(inner.next())?;
+                Ok(Self::Pair(key, value))
+            }
+            Rule::short => {
+                let value = Expr::parse(e.into_inner().next())?;
+                Ok(Self::Single(value))
+            }
+            other => unreachable!("Unexpected rule {:?}", other),
+        }
     }
 }
 
@@ -381,6 +473,96 @@ impl ParseAst for Stmt {
     }
 }
 
+impl ParseAst for Descriptor {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting(Rule::descriptor)?;
+        let mut pairs = pair.into_inner();
+
+        let mut name = String::new();
+        let mut sighashes = vec![];
+        let mut command = None;
+        let mut tx_fee = None;
+        let mut pass_fail = TestKind::Pass;
+        let mut stmts = Vec::new();
+        let mut request = None;
+        let mut signer = None;
+
+        let meta = pairs.next().expecting(Rule::meta)?;
+        for m in meta.into_inner() {
+            match m.as_rule() {
+                Rule::testname => {
+                    let mut inner = m.into_inner();
+                    let value = inner.next().expecting(Rule::string)?;
+                    let value = value.into_inner().next().expecting(Rule::inner)?;
+                    name = value.as_str().to_owned();
+                }
+                Rule::sighashes => {
+                    let arr = m.into_inner();
+                    for id in arr {
+                        let id = id.expecting(Rule::ident)?;
+                        sighashes.push(id.as_str().to_owned());
+                    }
+                }
+                Rule::command => {
+                    let construct = m.into_inner().next().expecting(Rule::constructor)?;
+                    let mut parts = construct.into_inner();
+                    let name = parts.next().expecting(Rule::ident)?;
+                    let mapping = parts.next().expecting(Rule::struct_map)?;
+                    let fields = Fields::parse(mapping)?;
+                    let kind = name.as_str().parse::<CommandKind>()?;
+                    command = Some(Command { fields, kind })
+                }
+                Rule::tx_fee => {
+                    let expr = m.into_inner().next().expecting(Rule::expr)?;
+                    let value = Expr::parse(expr)?;
+                    tx_fee = Some(value);
+                }
+                Rule::passfail => {
+                    let mut inner = m.into_inner();
+                    match inner.next() {
+                        Some(pair) => {
+                            let expected = pair.expecting(Rule::expr)?;
+                            let expr = Expr::parse(expected)?;
+                            pass_fail = TestKind::Fail(expr);
+                        }
+                        None => {
+                            pass_fail = TestKind::Pass;
+                        }
+                    }
+                }
+                Rule::request => {
+                    let expr = Expr::parse(m.into_inner().next())?;
+                    request = Some(expr);
+                }
+                Rule::signer => {
+                    let expr = Expr::parse(m.into_inner().next())?;
+                    signer = Some(expr);
+                }
+                foo => panic!("Unexpected rule {:?}", foo),
+            }
+        }
+        for pair in pairs {
+            if let Rule::statement = pair.as_rule() {
+                stmts.push(Stmt::parse(pair)?);
+            } else if let Rule::EOI = pair.as_rule() {
+                break;
+            } else {
+                panic!("Bad {:?}", pair)
+            }
+        }
+        Ok(Descriptor {
+            name,
+            sighashes,
+            command: command.unwrap(),
+            signer: signer.ok_or_else(|| eyre!("Must specify the signer of the command"))?,
+            tx_fee,
+            pass_fail,
+            stmts,
+            request,
+        })
+    }
+}
+
 impl ToRust for Command {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         let Command { kind, fields } = self;
@@ -404,95 +586,22 @@ fn sig_to_signer(sig: impl IdentFragment) -> Ident {
     format_ident!("_{}_signer", sig)
 }
 
-fn parse_descriptor(mut pairs: Pairs<Rule>) -> Result<Descriptor> {
-    let mut name = String::new();
-    let mut sighashes = vec![];
-    let mut command = None;
-    let mut tx_fee = None;
-    let mut pass_fail = TestKind::Pass;
-    let mut stmts = Vec::new();
-    let mut request = None;
-    let mut signer = None;
-
-    let meta = pairs.next().unwrap();
-    for m in meta.into_inner() {
-        match m.as_rule() {
-            Rule::testname => {
-                let mut inner = m.into_inner();
-                let value = inner.next().expecting(Rule::string)?;
-                let value = value.into_inner().next().expecting(Rule::inner)?;
-                name = value.as_str().to_owned();
-            }
-            Rule::sighashes => {
-                let arr = m.into_inner();
-                for id in arr {
-                    let id = id.expecting(Rule::ident)?;
-                    sighashes.push(id.as_str().to_owned());
-                }
-            }
-            Rule::command => {
-                let construct = m.into_inner().next().expecting(Rule::constructor)?;
-                let mut parts = construct.into_inner();
-                let name = parts.next().expecting(Rule::ident)?;
-                let mapping = parts.next().expecting(Rule::struct_map)?;
-                let fields = Fields::parse(mapping)?;
-                let kind = name.as_str().parse::<CommandKind>()?;
-                command = Some(Command { fields, kind })
-            }
-            Rule::tx_fee => {
-                let expr = m.into_inner().next().expecting(Rule::expr)?;
-                let value = Expr::parse(expr)?;
-                tx_fee = Some(value);
-            }
-            Rule::passfail => {
-                let mut inner = m.into_inner();
-                match inner.next() {
-                    Some(pair) => {
-                        let expected = pair.expecting(Rule::expr)?;
-                        let expr = Expr::parse(expected)?;
-                        pass_fail = TestKind::Fail(expr);
-                    }
-                    None => {
-                        pass_fail = TestKind::Pass;
-                    }
-                }
-            }
-            Rule::request => {
-                let expr = Expr::parse(m.into_inner().next())?;
-                request = Some(expr);
-            }
-            Rule::signer => {
-                let expr = Expr::parse(m.into_inner().next())?;
-                signer = Some(expr);
-            }
-            foo => panic!("Unexpected rule {:?}", foo),
-        }
-    }
-    for pair in pairs {
-        if let Rule::statement = pair.as_rule() {
-            stmts.push(Stmt::parse(pair)?);
-        } else if let Rule::EOI = pair.as_rule() {
-            break;
-        } else {
-            panic!("Bad {:?}", pair)
-        }
-    }
-    Ok(Descriptor {
-        name,
-        sighashes,
-        command: command.unwrap(),
-        signer: signer.unwrap(),
-        tx_fee,
-        pass_fail,
-        stmts,
-        request,
-    })
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
     Integration,
     Unit,
+}
+
+impl TryFrom<&str> for Mode {
+    type Error = color_eyre::Report;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match &*value.trim().to_ascii_lowercase() {
+            "integration" => Ok(Mode::Integration),
+            "unit" => Ok(Mode::Unit),
+            other => Err(eyre!("Invalid mode: {}", &other)),
+        }
+    }
 }
 
 pub trait ToRust {
@@ -507,7 +616,8 @@ impl ToRust for Expr {
                     Mode::Unit => code,
                     Mode::Integration => code.replace("crate", "ccprocessor_rust"),
                 };
-                let ts = TokenStream::from_str(&code).unwrap();
+                let ts = TokenStream::from_str(&code)
+                    .map_err(|e| eyre!("failed to parse tokenstream for code {} : {}", code, e))?;
                 quote! {
                     { #ts }
                 }
@@ -582,6 +692,15 @@ impl ToRust for Expr {
                     }
                 }
             },
+            Expr::MethodCall { value, methods } => {
+                let value = value.to_rust(mode)?;
+                let ts = TokenStream::from_str(&methods).map_err(|e| {
+                    eyre!("failed to parse tokenstream for code {} : {}", methods, e)
+                })?;
+                quote! {
+                    #value #ts
+                }
+            }
         })
     }
 }
@@ -741,7 +860,7 @@ impl ToRust for Expectation {
                     quote! {
                         {
                             expect_get_state_entry(
-                                tx_ctx,
+                                &mut tx_ctx,
                                 #id,
                                 #ret,
                                 None,
@@ -752,20 +871,15 @@ impl ToRust for Expectation {
                 Expectation::SetStateEntry { id, value } => todo!(),
                 Expectation::DeleteStateEntry { id } => todo!(),
                 Expectation::SetStateEntries { values } => {
-                    let (keys, values): (Vec<_>, Vec<_>) = values
-                        .into_iter()
-                        .map(|(k, v)| (k.to_rust(mode), v.to_rust(mode)))
-                        .unzip();
-
-                    let keys: Vec<_> = keys.into_iter().try_collect()?;
-                    let values: Vec<_> = values.into_iter().try_collect()?;
+                    let entries: Vec<_> =
+                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
 
                     quote! {
                         expect_set_state_entries(
                             &mut tx_ctx,
                             vec![
                                 #(
-                                    (#keys.to_string(), #values.into())
+                                    #entries
                                 ),*
                             ]
                         );
@@ -801,19 +915,12 @@ impl ToRust for Expectation {
                     let value = value.to_rust(mode)?;
 
                     quote! {
-                        {
-                            expect_set_state_entry(#id.to_string(), #value.into()).unwrap();
-                        }
+                        expect_set_state_entry(#id.to_string(), #value.into()).unwrap();
                     }
                 }
                 Expectation::SetStateEntries { values } => {
-                    let (keys, values): (Vec<_>, Vec<_>) = values
-                        .into_iter()
-                        .map(|(k, v)| (k.to_rust(mode), v.to_rust(mode)))
-                        .unzip();
-
-                    let keys: Vec<_> = keys.into_iter().try_collect()?;
-                    let values: Vec<_> = values.into_iter().try_collect()?;
+                    let entries: Vec<_> =
+                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
 
                     quote! {
                         {
@@ -821,7 +928,7 @@ impl ToRust for Expectation {
                                 ports,
                                 vec![
                                     #(
-                                        (#keys.to_string(), #values.into())
+                                        #entries
                                     ),*
                                 ]
                             ).unwrap();
@@ -834,6 +941,56 @@ impl ToRust for Expectation {
                 | Expectation::GetSighash { .. }
                 | Expectation::GetGuid { .. } => quote! {},
             },
+        })
+    }
+}
+
+impl ToRust for MapEntry {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match self {
+            MapEntry::Pair(key, value) => {
+                let key = key.to_rust(mode)?;
+                let value = value.to_rust(mode)?;
+
+                quote! {
+                    (#key.to_string(), #value.into())
+                }
+            }
+            MapEntry::Single(value) => {
+                let value = value.to_rust(mode)?;
+
+                quote! {
+                    #value
+                }
+            }
+        })
+    }
+}
+
+impl ToRust for StructEntry {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match self {
+            StructEntry::Pair(Field { name, value }) => {
+                let value = value.to_rust(mode)?;
+
+                quote! {
+                    #name: #value
+                }
+            }
+            StructEntry::Single(value) => {
+                let value = value.to_rust(mode)?;
+
+                quote! {
+                    #value
+                }
+            }
+            StructEntry::Update(value) => {
+                let value = value.to_rust(mode)?;
+
+                quote! {
+                    ..#value
+                }
+            }
         })
     }
 }
@@ -872,10 +1029,12 @@ impl ToRust for Descriptor {
             let sighashes = descriptor.sighashes.clone();
             let sighash_ids: Vec<Ident> =
                 sighashes.iter().map(|i| format_ident!("{}", i)).collect();
-
+            let signers: Vec<Ident> = sighashes.iter().map(sig_to_signer).collect();
+            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret()).collect();
             let sighash_decls = quote! {
                 #(
-                    let #sighash_ids = SigHash::from(#sighashes);
+                    let #signers = signer_with_secret(#secrets);
+                    let #sighash_ids = SigHash::from(&#signers);
                 )*
             };
             let command = descriptor.command.to_rust(mode)?;
@@ -963,18 +1122,7 @@ impl ToRust for Descriptor {
                 use protobuf::Message as _;
             };
 
-            let fns = quote! {
-                fn wallet_with(balance: Option<impl Into<Integer> + Clone>) -> Option<Vec<u8>> {
-                    balance.map(|b| {
-                        let wallet = ccprocessor_rust::protos::Wallet {
-                            amount: b.into().to_string(),
-                        };
-                        let mut buf = Vec::with_capacity(wallet.encoded_len());
-                        wallet.encode(&mut buf).unwrap();
-                        buf
-                    })
-                }
-            };
+            let fns = quote! {};
 
             let sighashes = descriptor.sighashes.clone();
             let sighash_ids: Vec<Ident> =
@@ -1063,11 +1211,41 @@ impl ToRust for Descriptor {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let contents = fs::read_to_string("test-description2")?;
-    let result = DescriptorParser::parse(Rule::descriptor, &contents)?;
-    let descriptor = parse_descriptor(result)?;
+    let app = clap::App::new("cctestgen")
+        .arg(Arg::with_name("filename").help("Input file").required(true))
+        .arg(
+            Arg::with_name("mode")
+                .help("Test mode to generate code for")
+                .required(true)
+                .value_name("mode")
+                .long("mode")
+                .short("m"),
+        );
+    let matches = app.get_matches();
+    let file = matches.value_of("filename").unwrap();
+    let mode = matches.value_of("mode").unwrap();
+
+    let contents = fs::read_to_string(file)?;
+    let mode = Mode::try_from(mode)?;
+
+    let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;
+    let descriptors = result.next().expecting(Rule::descriptors)?;
+    let mut code = Vec::new();
+    for p in descriptors.into_inner() {
+        if let Rule::EOI = p.as_rule() {
+            continue;
+        }
+        let descriptor = Descriptor::parse(p)?;
+        let rust = descriptor.to_rust(mode)?;
+        code.push(rust);
+    }
+    println!("use super::*;");
+    for c in code {
+        println!("\n{}", c);
+    }
+    // let descriptor = Descriptor::parse(result)?;
     // println!("{:?}", descriptor);
-    let rust = descriptor.to_rust(Mode::Unit)?;
-    println!("\n{}", rust);
+    // let rust = descriptor.to_rust(Mode::Unit)?;
+    // println!("\n{}", rust);
     Ok(())
 }

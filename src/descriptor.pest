@@ -1,5 +1,8 @@
 WHITESPACE = _{ " " | "\r" | "\n" | "\t" }
-descriptor = _{ SOI ~ meta ~ (statement+) ~ EOI }
+COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!("\r" | "\n") ~ ANY)*)}
+
+descriptors = { SOI ~ descriptor ~ ("---" ~ descriptor)* ~ EOI}
+descriptor = { meta ~ (statement+) }
 statement = {
     (binding ~ ";") |
     (require ~ ";") |
@@ -34,7 +37,10 @@ request = {
 }
 test_type = _{ "result" ~ "=" ~ passfail ~ ";" }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor  | ident }
+expr = { method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
+non_method_expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident }
+method_call = { non_method_expr ~ calls }
+calls = { ("." ~ ident ~ "(" ~ ")")+ }
 default = { "default" }
 literal = { string | number | array | mapping | option }
 option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
@@ -56,7 +62,7 @@ expectation = { get_balance | get_state | set_states | set_state | delete_state 
 get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }
 get_state = { "get" ~ "state" ~ "at" ~ expr ~ "->" ~ expr }
 set_state = { "set" ~ "state" ~ "at" ~ expr ~ "to" ~ expr }
-set_states = { "set" ~ "states" ~ mapping}
+set_states = { "set" ~ "states" ~ mapping }
 get_sighash = { "sighash" ~ "->" ~ expr }
 get_guid = { "guid" ~ "->" ~ expr }
 delete_state = { "delete" ~ "state" ~ "at" ~ expr }
@@ -66,14 +72,17 @@ delete_state = { "delete" ~ "state" ~ "at" ~ expr }
 constructor = { ident ~ struct_map }
 struct_map = {
     ("{" ~ "}") |
-    ("{" ~ struct_pair ~ ("," ~ struct_pair)* ~ ((",") | ("," ~ "." ~ "." ~ default ))? ~ "}")
+    ("{" ~ struct_pair ~ ("," ~ struct_pair)* ~ ","? ~ "}")
 }
-struct_pair = { ident ~ ":" ~ expr }
+struct_pair = { field_pair | short | update }
+field_pair = { ident ~ ":" ~ expr }
+update = {  "." ~ "." ~ expr }
 mapping = {
     ("{" ~ "}") |
     ("{" ~ pair ~ ("," ~ pair)* ~ (",")? ~ "}")
 }
-pair = { expr ~ ":" ~ expr }
+pair = { (expr ~ ":" ~ expr) | short }
+short = { expr }
 
 
 string = ${ "\"" ~ inner ~ "\"" }
@@ -86,8 +95,8 @@ char = {
 number = @{
     "-"?
     ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)
-    ~ ("." ~ ASCII_DIGIT*)?
-    ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+    // ~ ("." ~ ASCII_DIGIT*)?
+    // ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
     ~ (ASCII_ALPHANUMERIC+)?
 }
 array = {

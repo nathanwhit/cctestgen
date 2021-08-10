@@ -22,15 +22,15 @@ impl ToRust for Field {
 
 impl ToRust for Command {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
-        let Command { kind, fields } = self;
-        let kind = format_ident!("{}", kind.as_ref());
+        let Command { name, fields } = self;
+        let name: syn::Path = syn::parse_str(&name)?;
         let fields = fields
             .into_iter()
             .map(|f| ToRust::to_rust(f, mode))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(quote! {
-            #kind {
+            #name {
                 #(
                     #fields
                 ),*

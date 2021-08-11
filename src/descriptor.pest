@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\r" | "\n" | "\t" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!("\r" | "\n") ~ ANY)*)}
 
-descriptors = { SOI ~ descriptor ~ ("---" ~ descriptor)* ~ EOI}
+descriptors = { SOI ~ descriptor ~ ("---" ~ descriptor)* ~ EOI }
 descriptor = { top_statement+ }
 top_statement = _ { meta | statement }
 statement = {
@@ -35,19 +35,28 @@ request = {
 }
 test_type = _{ "result" ~ "=" ~ passfail }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident | expr_block }
-non_method_expr = { rustcode | default | sighash | walletid | guid_for | signer_for | literal | constructor | ident | expr_block }
-expr_block = { "{" ~ expr ~ "}" } 
+expr = { reference | method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | fn_call | constructor | ident | expr_block }
+non_method_expr = { reference | rustcode | default | sighash | walletid | guid_for | signer_for | literal | fn_call | constructor | ident | expr_block }
+expr_block = { "{" ~ expr ~ "}" }
+fn_call = { path ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
 method_call = { non_method_expr ~ calls }
 calls = { ("." ~ ident ~ ("(" ~ ")")?)+ }
+reference = { (mut_ref | immut_ref) ~ expr }
+mut_ref = { "&" ~ "mut" }
+immut_ref = { "&" }
 default = { "default" }
-literal = { string | number | array | option }
+literal = { owned_string | string | number | array | option | bool | result | tuple }
+tuple = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+bool = { "true" | "false" }
 option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
+result = { ok | err }
+ok = { ("Ok" ~ "(" ~ expr ~ ")") }
+err = { ("Err" ~ "(" ~ expr ~ ")") }
 field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 walletid = { ("WalletId" ~ "(" ~ ident ~ ")")}
 sighash = {  ("Sighash" ~ "(" ~ ident ~ ")") }
-guid_for = { "Guid" ~ "(" ~ ident ~ ")" }
+guid_for = { "Guid" ~ "(" ~ ident? ~ ")" }
 signer_for = { "Signer" ~ "(" ~ ident ~ ")" }
 rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
 code = ${  (!("{" | "}") ~ ANY  | block)* }
@@ -56,9 +65,10 @@ require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
 requirement = { wallet | guid | send_tx }
 guid = { "Guid" ~ "for" ~ ident }
 wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
-send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr}
+send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr ~ ( "," ~ "guid" ~ "=" ~ expr)? }
 expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
-expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid }
+expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid | verify }
+verify = { "verify" ~ "->" ~ expr }
 get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }
 get_state = { "get" ~ "state" ~ "at" ~ expr ~ "->" ~ expr }
 set_state = { "set" ~ "state" ~ "at" ~ expr ~ "to" ~ expr }
@@ -86,6 +96,7 @@ short = { expr }
 
 
 string = ${ "\"" ~ inner ~ "\"" }
+owned_string = { "s" ~ string }
 inner = @{ char* }
 char = {
     !("\"" | "\\") ~ ANY

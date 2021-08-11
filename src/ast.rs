@@ -10,9 +10,9 @@ use pest::iterators::Pair;
 
 use proc_macro2::{Ident, Literal};
 
-use quote::format_ident;
+use quote::{format_ident, ToTokens};
 use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
-use syn::Path;
+use syn::{LitBool, Path};
 
 #[derive(Debug, Clone, Copy, AsRefStr, IntoStaticStr, EnumString)]
 
@@ -134,6 +134,18 @@ pub enum StructEntry {
 }
 
 #[derive(Debug, Clone)]
+pub enum ResultExpr {
+    Ok(Box<Expr>),
+    Err(Box<Expr>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RefKind {
+    Mut,
+    Immut,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     RustCode(String),
     Sighash(Sighash),
@@ -144,10 +156,14 @@ pub enum Expr {
     Mapping(Mapping),
     Literal(Literal),
     WalletId(Ident),
-    GuidFor(Ident),
+    GuidFor(Option<Ident>),
     SignerFor(Ident),
     Option(Option<Box<Expr>>),
+    Result(ResultExpr),
+    Tuple(Vec<Expr>),
     MethodCall { value: Box<Expr>, methods: String },
+    FnCall { func: Path, args: Vec<Expr> },
+    Ref { kind: RefKind, expr: Box<Expr> },
 }
 
 #[derive(Debug, Clone)]
@@ -168,9 +184,18 @@ impl Default for Expr {
 
 #[derive(Debug, Clone)]
 pub enum Requirement {
-    Wallet { sighash: Sighash, amount: Expr },
-    Guid { id: Ident },
-    SendTx { tx: Expr, signer: Expr },
+    Wallet {
+        sighash: Sighash,
+        amount: Expr,
+    },
+    Guid {
+        id: Ident,
+    },
+    SendTx {
+        tx: Expr,
+        signer: Expr,
+        guid: Option<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +207,7 @@ pub enum Expectation {
     DeleteStateEntry { id: Expr },
     GetSighash { sig: Expr },
     GetGuid { guid: Expr },
+    Verify(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +230,6 @@ impl ParseAst for Expr {
             .into_inner()
             .next()
             .unwrap();
-
         match expr.as_rule() {
             Rule::code => {
                 let code = expr.as_str();
@@ -237,6 +262,44 @@ impl ParseAst for Expr {
                             Ok(Expr::Option(None))
                         }
                     }
+                    Rule::owned_string => {
+                        let mut inner = next.into_inner();
+
+                        let lit = Literal::from_str(inner.next().expecting(Rule::string)?.as_str())
+                            .map_err(|e| eyre!("Invalid literal {:?}", e))?;
+
+                        let ts = quote::quote! {
+                            String::from(#lit)
+                        };
+                        Ok(Expr::RustCode(ts.to_string()))
+                    }
+                    Rule::bool => {
+                        let lit: LitBool = syn::parse_str(next.as_str())?;
+
+                        Ok(Expr::RustCode(lit.into_token_stream().to_string()))
+                    }
+                    Rule::tuple => {
+                        let inner = next.into_inner();
+
+                        let mut elements = Vec::new();
+                        for pair in inner {
+                            elements.push(Expr::parse(pair)?);
+                        }
+
+                        Ok(Expr::Tuple(elements))
+                    }
+                    Rule::result => {
+                        let next = next.into_inner().next().unwrap();
+                        match next.as_rule() {
+                            Rule::ok => Ok(Expr::Result(ResultExpr::Ok(Box::new(Expr::parse(
+                                next.into_inner().next(),
+                            )?)))),
+                            Rule::err => Ok(Expr::Result(ResultExpr::Err(Box::new(Expr::parse(
+                                next.into_inner().next(),
+                            )?)))),
+                            other => unreachable!("unexpected rule {:?}", other),
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -246,13 +309,32 @@ impl ParseAst for Expr {
                 let fields = Fields::parse(inner.next())?;
                 Ok(Expr::Construction { name, fields })
             }
-            Rule::ident => Ok(Expr::Ident(syn::parse_str(expr.as_str())?)),
+            Rule::ident => match syn::parse_str(expr.as_str()) {
+                Ok(ident) => Ok(Expr::Ident(ident)),
+                Err(e) => {
+                    ariadne::Report::build(ariadne::ReportKind::Error, (), expr.as_span().start())
+                        .with_message(&e)
+                        .with_label(ariadne::Label::new(
+                            expr.as_span().start()..expr.as_span().end(),
+                        ))
+                        .finish()
+                        .eprint(&mut *crate::SOURCE.get().unwrap().lock().unwrap())
+                        .unwrap();
+                    Err(e)?
+                }
+            },
             Rule::walletid => Ok(Expr::WalletId(syn::parse_str(
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
-            Rule::guid_for => Ok(Expr::GuidFor(syn::parse_str(
-                expr.into_inner().next().expecting(Rule::ident)?.as_str(),
-            )?)),
+            Rule::guid_for => {
+                let cmd = if let Some(next) = expr.into_inner().next() {
+                    let id = next.expecting(Rule::ident)?;
+                    syn::parse_str(id.as_str())?
+                } else {
+                    None
+                };
+                Ok(Expr::GuidFor(cmd))
+            }
             Rule::signer_for => Ok(Expr::SignerFor(syn::parse_str(
                 expr.into_inner().next().expecting(Rule::ident)?.as_str(),
             )?)),
@@ -264,7 +346,34 @@ impl ParseAst for Expr {
                 Ok(Expr::MethodCall { value, methods })
             }
             Rule::expr_block => Ok(Expr::parse(expr.into_inner().next())?),
-            foo => unreachable!("Bad, we got a {:?}", foo),
+            Rule::fn_call => {
+                let mut inner = expr.into_inner();
+                let func = syn::parse_str(inner.next().expecting(Rule::path)?.as_str())?;
+                let mut args = Vec::new();
+                for arg in inner {
+                    args.push(Expr::parse(arg)?);
+                }
+                Ok(Expr::FnCall { func, args })
+            }
+            Rule::reference => {
+                let mut inner = expr.into_inner();
+                let kind = RefKind::parse(inner.next())?;
+                let expr = Box::new(Expr::parse(inner.next())?);
+                Ok(Expr::Ref { kind, expr })
+            }
+            foo => unreachable!("Bad, we got a {:?}: {:?}", foo, expr.as_str()),
+        }
+    }
+}
+
+impl ParseAst for RefKind {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting_one_of(&[Rule::immut_ref, Rule::mut_ref])?;
+
+        match pair.as_rule() {
+            Rule::immut_ref => Ok(RefKind::Immut),
+            Rule::mut_ref => Ok(RefKind::Mut),
+            other => unreachable!("shouldn't be reachable here {:?}", other),
         }
     }
 }
@@ -376,7 +485,8 @@ impl ParseAst for Requirement {
                 let mut inner = req.into_inner();
                 let tx = Expr::parse(inner.next())?;
                 let signer = Expr::parse(inner.next())?;
-                Ok(Requirement::SendTx { tx, signer })
+                let guid = inner.next().map(Expr::parse).transpose()?;
+                Ok(Requirement::SendTx { tx, signer, guid })
             }
             _ => unreachable!(),
         }
@@ -424,6 +534,10 @@ impl ParseAst for Expectation {
             Rule::get_guid => {
                 let guid = Expr::parse(inner.into_inner().next())?;
                 Ok(Expectation::GetGuid { guid })
+            }
+            Rule::verify => {
+                let ret = Expr::parse(inner.into_inner().next())?;
+                Ok(Expectation::Verify(ret))
             }
             bad => unreachable!("Did not expect to find {:?}", bad),
         }

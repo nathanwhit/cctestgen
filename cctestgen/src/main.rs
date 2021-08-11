@@ -3,8 +3,9 @@ pub mod gen;
 
 use ast::{Descriptor, PairExt};
 use gen::{Mode, ToRust};
+use once_cell::sync::OnceCell;
 
-use std::{convert::TryFrom, fs};
+use std::{convert::TryFrom, fs, sync::Mutex};
 
 use clap::Arg;
 use color_eyre::Result;
@@ -24,6 +25,8 @@ use parse::{DescriptorParser, Rule};
 
 use crate::ast::ParseAst;
 
+pub static SOURCE: OnceCell<Mutex<ariadne::Source>> = OnceCell::new();
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     let app = clap::App::new("cctestgen")
@@ -41,6 +44,7 @@ fn main() -> Result<()> {
     let mode = matches.value_of("mode").unwrap();
 
     let contents = fs::read_to_string(file)?;
+    let _ = SOURCE.set(Mutex::new(ariadne::Source::from(&contents)));
     let mode = Mode::try_from(mode)?;
 
     let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;

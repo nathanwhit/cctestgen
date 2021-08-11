@@ -82,6 +82,35 @@ impl ToRust for syn::Path {
     }
 }
 
+impl ToRust for Option<Expr> {
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        Ok(match self {
+            Some(expr) => {
+                let expr = expr.to_rust(mode)?;
+                quote! {
+                    Some(#expr)
+                }
+            }
+            None => quote! { None },
+        })
+    }
+}
+
+impl<T> ToRust for Vec<T>
+where
+    T: ToRust,
+{
+    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+        let elements: Vec<_> = self.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+
+        Ok(quote! {
+            #(
+                #elements
+            ),*
+        })
+    }
+}
+
 impl ToRust for Expr {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         Ok(match self {
@@ -152,12 +181,33 @@ impl ToRust for Expr {
                     { None }
                 },
             },
-            Expr::GuidFor(cmd) => {
-                let guid = command_to_guid(cmd);
-                quote! {
-                    { #guid.clone() }
+            Expr::Result(res) => match res {
+                ResultExpr::Ok(expr) => {
+                    let expr = expr.to_rust(mode)?;
+                    quote! {
+                        Ok(#expr)
+                    }
                 }
-            }
+                ResultExpr::Err(expr) => {
+                    let expr = expr.to_rust(mode)?;
+                    quote! {
+                        Err(#expr)
+                    }
+                }
+            },
+            Expr::GuidFor(cmd) => match cmd {
+                Some(id) => {
+                    let guid = command_to_guid(id);
+                    quote! {
+                        { #guid.clone() }
+                    }
+                }
+                None => {
+                    quote! {
+                        { Guid::from(make_nonce()) }
+                    }
+                }
+            },
             Expr::SignerFor(sig) => match mode {
                 Mode::Unit => quote! {},
                 Mode::Integration => {
@@ -176,18 +226,36 @@ impl ToRust for Expr {
                     #value #ts
                 }
             }
-        })
-    }
-}
+            Expr::Tuple(elements) => {
+                let elements: Vec<_> = elements
+                    .into_iter()
+                    .map(|e| e.to_rust(mode))
+                    .try_collect()?;
 
-impl ToRust for Vec<Stmt> {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
-        let stmts: Vec<_> = self.into_iter().map(|s| s.to_rust(mode)).try_collect()?;
-        Ok(quote! {
-            {
-                #(
-                    #stmts
-                )*
+                quote! {
+                    (
+                        #( #elements ),*
+                    )
+                }
+            }
+            Expr::FnCall { func, args } => {
+                let func = func.to_rust(mode)?;
+                let args = args.to_rust(mode)?;
+
+                quote! {
+                    #func(#args)
+                }
+            }
+            Expr::Ref { kind, expr } => {
+                let refer = match kind {
+                    RefKind::Mut => quote! { &mut },
+                    RefKind::Immut => quote! { & },
+                };
+                let expr = expr.to_rust(mode)?;
+
+                quote! {
+                    #refer #expr
+                }
             }
         })
     }
@@ -303,7 +371,7 @@ impl ToRust for Requirement {
                                 blockchain_tx_id: #random_tx_id.into(),
                             };
                             let response = send_command_with_signer(collect_coins, ports, None, &#signer);
-                            assert!(matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed)));
+                            assert_matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed));
 
                         }
                         let #id = WalletId::from(&#sig);
@@ -315,19 +383,45 @@ impl ToRust for Requirement {
                         let #id = Guid::from(make_nonce());
                     }
                 }
-                Requirement::SendTx { tx, signer } => {
+                Requirement::SendTx { tx, signer, guid } => {
                     let tx = tx.to_rust(mode)?;
                     let signer = signer.to_rust(mode)?;
+                    let guid = match guid {
+                        Some(expr) => {
+                            let expr = expr.to_rust(mode)?;
+                            quote! {
+                                Some(Nonce::from(#expr))
+                            }
+                        }
+                        None => quote! { None },
+                    };
+
                     quote! {
                         {
                             let tx = #tx;
-                            let response = send_command_with_signer(tx, ports, None, &#signer);
-                            assert!(matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed)));
+                            let response = send_command_with_signer(tx, ports, #guid, &#signer);
+                            assert_matches!(complete_batch(&response.link, None), Some(BatchStatus::Committed));
                         }
                     }
                 }
             },
         })
+    }
+}
+
+fn into_result(expr: Expr) -> Expr {
+    match expr {
+        Expr::Result(_) => expr,
+        Expr::RustCode(_) => expr,
+        e => Expr::Result(ResultExpr::Ok(Box::new(e))),
+    }
+}
+
+fn into_option(expr: Expr) -> Expr {
+    match expr {
+        Expr::Option(_) => expr,
+        Expr::RustCode(_) => expr,
+        e => Expr::Option(Some(Box::new(e))),
     }
 }
 
@@ -362,7 +456,21 @@ impl ToRust for Expectation {
                 }
                 Expectation::GetStateEntry { id, ret } => {
                     let id = id.to_rust(mode)?;
-                    let ret = ret.to_rust(mode)?;
+
+                    let ret = into_option(ret);
+
+                    let ret = if let Expr::Option(o) = ret {
+                        match o {
+                            Some(expr) => Expr::Option(Some(expr)).to_rust(mode)?,
+                            None => quote! {
+                                <Option<crate::protos::Wallet>>::None
+                            },
+                        }
+                    } else {
+                        ret.to_rust(mode)?
+                    };
+
+                    
 
                     quote! {
                         {
@@ -411,7 +519,18 @@ impl ToRust for Expectation {
                             let guid = #guid.clone();
 
                             ctx.expect_guid()
-                                .return_once(move |_| guid);
+                                .returning(move |_| guid.clone());
+                        }
+                    }
+                }
+                Expectation::Verify(ret) => {
+                    let ret = into_result(ret).to_rust(mode)?;
+                    quote! {
+                        {
+                            let ret = #ret;
+
+                            ctx.expect_verify()
+                                .return_once(move |_| ret);
                         }
                     }
                 }
@@ -446,7 +565,8 @@ impl ToRust for Expectation {
                 Expectation::GetBalance { .. }
                 | Expectation::GetStateEntry { .. }
                 | Expectation::GetSighash { .. }
-                | Expectation::GetGuid { .. } => quote! {},
+                | Expectation::GetGuid { .. }
+                | Expectation::Verify(_) => quote! {},
             },
         })
     }
@@ -648,6 +768,17 @@ impl ToRust for Descriptor {
                     let mut tx_fee = ccprocessor_rust::handler::constants::TX_FEE.clone();
                 }
             };
+            let request = descriptor.request;
+            let request_decl = if let Some(expr) = request {
+                let request = expr.to_rust(mode)?;
+                quote! {
+                    let mut request = #request;
+                }
+            } else {
+                quote! {
+                    let mut request = TpProcessRequest::default();
+                }
+            };
 
             let (expectations, stmts): (Vec<_>, Vec<_>) = descriptor
                 .stmts
@@ -667,11 +798,11 @@ impl ToRust for Descriptor {
             let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
                 let err = err.to_rust(mode)?;
                 quote! {
-                    execute_failure(command, #err, ports, Some(Nonce::from(#guid)), &#signer);
+                    execute_failure(command, #err, ports, Some(Nonce::from(#guid.clone())), &#signer);
                 }
             } else {
                 quote! {
-                    execute_success(command, ports, Some(Nonce::from(#guid)), &#signer);
+                    execute_success(command, ports, Some(Nonce::from(#guid.clone())), &#signer);
                 }
             };
 
@@ -684,6 +815,7 @@ impl ToRust for Descriptor {
             let body = quote! {
                 #sighash_decls
                 #tx_fee_decl
+                #request_decl
 
                 #( #stmts )*
 

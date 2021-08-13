@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
-use crate::gen::Mode;
+use crate::{gen::Mode, SOURCE};
 
 use super::parse::Rule;
 
+use ariadne::Label;
 use color_eyre::{eyre::eyre, Result};
 
 use pest::iterators::Pair;
@@ -205,6 +206,7 @@ pub enum Expectation {
     SetStateEntry { id: Expr, value: Expr },
     SetStateEntries { values: Mapping },
     DeleteStateEntry { id: Expr },
+    DeleteStateEntries { values: Vec<Expr> },
     GetSighash { sig: Expr },
     GetGuid { guid: Expr },
     Verify(Expr),
@@ -493,6 +495,19 @@ impl ParseAst for Requirement {
     }
 }
 
+impl ParseAst for Vec<Expr> {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting(Rule::array)?;
+
+        let mut exprs = Vec::new();
+        for expr in pair.into_inner() {
+            exprs.push(Expr::parse(expr)?);
+        }
+
+        Ok(exprs)
+    }
+}
+
 impl ParseAst for Expectation {
     fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
         let exp = pair.expecting(Rule::expectation)?;
@@ -508,7 +523,27 @@ impl ParseAst for Expectation {
             Rule::get_state => {
                 let mut inner = inner.into_inner();
                 let id = Expr::parse(inner.next())?;
-                let ret = Expr::parse(inner.next())?;
+                let ret_pair = inner
+                    .next()
+                    .expecting_one_of(&[Rule::expr, Rule::non_method_expr])?;
+                if ret_pair.as_str().contains("to_bytes") {
+                    ariadne::Report::build(
+                        ariadne::ReportKind::Warning,
+                        (),
+                        ret_pair.as_span().start(),
+                    )
+                    .with_message("passing bytes as the expectation's return value")
+                    .with_note("the return value is serialized automatically")
+                    .with_label(
+                        Label::new(ret_pair.as_span().start()..ret_pair.as_span().end())
+                            .with_color(ariadne::Color::Yellow)
+                            .with_message("consider removing the `to_bytes` call"),
+                    )
+                    .finish()
+                    .eprint(&mut *SOURCE.get().unwrap().lock().unwrap())
+                    .unwrap();
+                }
+                let ret = Expr::parse(ret_pair)?;
                 Ok(Expectation::GetStateEntry { id, ret })
             }
             Rule::set_state => {
@@ -526,6 +561,10 @@ impl ParseAst for Expectation {
                 let mut inner = inner.into_inner();
                 let id = Expr::parse(inner.next())?;
                 Ok(Expectation::DeleteStateEntry { id })
+            }
+            Rule::delete_states => {
+                let values = Vec::parse(inner.into_inner().next())?;
+                Ok(Expectation::DeleteStateEntries { values })
             }
             Rule::get_sighash => {
                 let sig = Expr::parse(inner.into_inner().next())?;
@@ -639,15 +678,10 @@ impl ParseAst for Descriptor {
                             }
                         }
                         Rule::command => {
-                            let construct = m.into_inner().next().expecting(Rule::constructor)?;
-                            let mut parts = construct.into_inner();
-                            let name = parts.next().expecting(Rule::path)?;
-                            let mapping = parts.next().expecting(Rule::struct_map)?;
-                            let fields = Fields::parse(mapping)?;
-                            let name = syn::parse_str(name.as_str())?;
+                            let value = Expr::parse(m.into_inner().next())?;
                             stmts.push(Stmt::Binding {
                                 name: "command".to_string(),
-                                value: Expr::Construction { name, fields },
+                                value,
                             });
                             stmts.push(Stmt::Require {
                                 requirements: vec![Requirement::Guid {

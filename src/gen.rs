@@ -71,7 +71,6 @@ impl ToRust for syn::Path {
             Mode::Unit => Ok(self.to_token_stream()),
             Mode::Integration => {
                 for segment in &mut self.segments {
-                    eprintln!("{}", segment.ident);
                     if segment.ident == "crate" {
                         segment.ident = format_ident!("ccprocessor_rust");
                     }
@@ -470,8 +469,6 @@ impl ToRust for Expectation {
                         ret.to_rust(mode)?
                     };
 
-                    
-
                     quote! {
                         {
                             expect_get_state_entry(
@@ -485,6 +482,20 @@ impl ToRust for Expectation {
                 }
                 Expectation::SetStateEntry { id: _, value: _ } => todo!(),
                 Expectation::DeleteStateEntry { id: _ } => todo!(),
+                Expectation::DeleteStateEntries { values } => {
+                    let entries: Vec<_> =
+                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+                    quote! {
+                        expect_delete_state_entries(
+                            &mut tx_ctx,
+                            vec![
+                                #(
+                                    #entries.to_string()
+                                ),*
+                            ]
+                        );
+                    }
+                }
                 Expectation::SetStateEntries { values } => {
                     let entries: Vec<_> =
                         values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
@@ -562,6 +573,23 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::DeleteStateEntry { id: _ } => todo!(),
+                Expectation::DeleteStateEntries { values } => {
+                    let entries: Vec<_> =
+                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+
+                    quote! {
+                        {
+                            expect_delete_state_entries(
+                                ports,
+                                vec![
+                                    #(
+                                        #entries.to_string()
+                                    ),*
+                                ]
+                            ).unwrap();
+                        }
+                    }
+                }
                 Expectation::GetBalance { .. }
                 | Expectation::GetStateEntry { .. }
                 | Expectation::GetSighash { .. }
@@ -638,6 +666,7 @@ impl ToRust for Descriptor {
 
             let imports = quote! {
                 use crate::handler::types::*;
+                use std::str::FromStr as _;
             };
 
             let fns = quote! {
@@ -742,6 +771,8 @@ impl ToRust for Descriptor {
                 use ccprocessor_rust::handler::types::*;
                 use prost::Message as _;
                 use protobuf::Message as _;
+                use std::str::FromStr as _;
+                use std::convert::TryFrom as _;
             };
 
             let fns = quote! {};

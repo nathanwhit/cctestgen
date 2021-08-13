@@ -22,7 +22,7 @@ sighashes = {
     "sighashes" ~ "=" ~ (("[" ~ "]") | ("[" ~ ident ~ ("," ~ ident)* ~ "]"))
 }
 command = {
-    "command" ~ "=" ~ constructor
+    "command" ~ "=" ~ expr
 }
 signer = {
     "signer" ~ "=" ~ expr
@@ -67,7 +67,7 @@ guid = { "Guid" ~ "for" ~ ident }
 wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
 send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr ~ ( "," ~ "guid" ~ "=" ~ expr)? }
 expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
-expectation = { get_balance | get_state | set_states | set_state | delete_state | get_sighash | get_guid | verify }
+expectation = { get_balance | get_state | set_states | set_state | delete_state | delete_states | get_sighash | get_guid | verify }
 verify = { "verify" ~ "->" ~ expr }
 get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }
 get_state = { "get" ~ "state" ~ "at" ~ expr ~ "->" ~ expr }
@@ -76,6 +76,7 @@ set_states = { "set" ~ "states" ~ mapping }
 get_sighash = { "sighash" ~ "->" ~ expr }
 get_guid = { "guid" ~ "->" ~ expr }
 delete_state = { "delete" ~ "state" ~ "at" ~ expr }
+delete_states = { "delete" ~ "states" ~ array }
 
 
 path = { ident ~ ("::" ~ ident)* }
@@ -112,5 +113,5 @@ number = @{
 }
 array = {
     "[" ~ "]" |
-    "[" ~ expr ~ ("," ~ expr)* ~ "]"
+    "[" ~ expr ~ (("," ~ expr)* ~ ","?)? ~ "]"
 }

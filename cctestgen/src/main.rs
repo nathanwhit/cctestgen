@@ -8,7 +8,7 @@ use once_cell::sync::OnceCell;
 use std::{convert::TryFrom, fs, sync::Mutex};
 
 use clap::Arg;
-use color_eyre::Result;
+use color_eyre::{eyre::Context, Result};
 
 use pest::Parser;
 
@@ -26,6 +26,7 @@ use parse::{DescriptorParser, Rule};
 use crate::ast::ParseAst;
 
 pub static SOURCE: OnceCell<Mutex<ariadne::Source>> = OnceCell::new();
+pub static FILENAME: OnceCell<String> = OnceCell::new();
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -43,7 +44,10 @@ fn main() -> Result<()> {
     let file = matches.value_of("filename").unwrap();
     let mode = matches.value_of("mode").unwrap();
 
-    let contents = fs::read_to_string(file)?;
+    let _ = FILENAME.set(file.into());
+
+    let contents = fs::read_to_string(file)
+        .wrap_err_with(|| color_eyre::eyre::eyre!("failed to read file {}", file))?;
     let _ = SOURCE.set(Mutex::new(ariadne::Source::from(&contents)));
     let mode = Mode::try_from(mode)?;
 

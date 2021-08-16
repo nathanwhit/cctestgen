@@ -154,7 +154,7 @@ checksum = "e70cc2f62c6ce1868963827bd677764c62d07c3d9a3e1fb1177ee1a9ab199eb2"
 
 [[package]]
 name = "cctestgen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "Inflector",
  "ariadne",
@@ -168,6 +168,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rand",
+ "rand_chacha",
  "strum",
  "strum_macros",
  "syn",

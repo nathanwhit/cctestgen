@@ -239,7 +239,7 @@ impl ParseAst for Ident {
                     .finish()
                     .eprint(&mut *crate::SOURCE.get().unwrap().lock().unwrap())
                     .unwrap();
-                Err(e)?
+                Err(e.into())
             }
         }
     }
@@ -342,7 +342,7 @@ impl ParseAst for Expr {
                         .finish()
                         .eprint(&mut *crate::SOURCE.get().unwrap().lock().unwrap())
                         .unwrap();
-                    Err(e)?
+                    Err(e.into())
                 }
             },
             Rule::walletid => Ok(Expr::WalletId(syn::parse_str(
@@ -383,7 +383,7 @@ impl ParseAst for Expr {
                 let expr = Box::new(Expr::parse(inner.next())?);
                 Ok(Expr::Ref { kind, expr })
             }
-            foo => unreachable!("Bad, we got a {:?}: {:?}", foo, expr.as_str()),
+            other => unreachable!("Bad, we got a {:?}: {:?}", other, expr.as_str()),
         }
     }
 }

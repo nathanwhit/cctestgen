@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 
 use std::{convert::TryFrom, fs, sync::Mutex};
 
-use clap::Arg;
+use clap::{crate_version, Arg};
 use color_eyre::{eyre::Context, Result};
 
 use pest::Parser;
@@ -23,7 +23,7 @@ pub mod parse {
 
 use parse::{DescriptorParser, Rule};
 
-use crate::ast::ParseAst;
+use crate::{ast::ParseAst, gen::CodegenCtx};
 
 pub static SOURCE: OnceCell<Mutex<ariadne::Source>> = OnceCell::new();
 pub static FILENAME: OnceCell<String> = OnceCell::new();
@@ -31,6 +31,7 @@ pub static FILENAME: OnceCell<String> = OnceCell::new();
 fn main() -> Result<()> {
     color_eyre::install()?;
     let app = clap::App::new("cctestgen")
+        .version(crate_version!())
         .arg(Arg::with_name("filename").help("Input file").required(true))
         .arg(
             Arg::with_name("mode")
@@ -54,12 +55,13 @@ fn main() -> Result<()> {
     let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;
     let descriptors = result.next().expecting(Rule::descriptors)?;
     let mut code = Vec::new();
+    let mut ctx = CodegenCtx::new();
     for p in descriptors.into_inner() {
         if let Rule::EOI = p.as_rule() {
             continue;
         }
         let descriptor = Descriptor::parse(p)?;
-        let rust = descriptor.to_rust(mode)?;
+        let rust = descriptor.to_rust(mode, &mut ctx)?;
         code.push(rust);
     }
     if let Mode::Unit = mode {

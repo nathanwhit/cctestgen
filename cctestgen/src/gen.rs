@@ -6,14 +6,16 @@ use inflector::Inflector;
 use itertools::Itertools;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, IdentFragment, ToTokens};
+use rand::SeedableRng;
+use rand_chacha::ChaCha12Rng;
 use syn::Ident;
 
 use super::ast::*;
 
 impl ToRust for Field {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         let Self { name, value } = self;
-        let value = value.to_rust(mode)?;
+        let value = value.to_rust(mode, ctx)?;
         Ok(quote! {
             #name : #value
         })
@@ -21,12 +23,12 @@ impl ToRust for Field {
 }
 
 impl ToRust for Command {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         let Command { name, fields } = self;
         let name: syn::Path = syn::parse_str(&name)?;
         let fields = fields
             .into_iter()
-            .map(|f| ToRust::to_rust(f, mode))
+            .map(|f| ToRust::to_rust(f, mode, ctx))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(quote! {
@@ -61,12 +63,31 @@ impl TryFrom<&str> for Mode {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CodegenCtx {
+    rng: ChaCha12Rng,
+}
+
+impl CodegenCtx {
+    pub fn new() -> CodegenCtx {
+        CodegenCtx {
+            rng: ChaCha12Rng::seed_from_u64(12345),
+        }
+    }
+}
+
+impl Default for CodegenCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub trait ToRust {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream>;
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream>;
 }
 
 impl ToRust for syn::Path {
-    fn to_rust(mut self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(mut self, mode: Mode, _ctx: &mut CodegenCtx) -> Result<TokenStream> {
         match mode {
             Mode::Unit => Ok(self.to_token_stream()),
             Mode::Integration => {
@@ -82,10 +103,10 @@ impl ToRust for syn::Path {
 }
 
 impl ToRust for Option<Expr> {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
             Some(expr) => {
-                let expr = expr.to_rust(mode)?;
+                let expr = expr.to_rust(mode, ctx)?;
                 quote! {
                     Some(#expr)
                 }
@@ -99,8 +120,11 @@ impl<T> ToRust for Vec<T>
 where
     T: ToRust,
 {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
-        let elements: Vec<_> = self.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let elements: Vec<_> = self
+            .into_iter()
+            .map(|e| e.to_rust(mode, ctx))
+            .try_collect()?;
 
         Ok(quote! {
             #(
@@ -111,7 +135,7 @@ where
 }
 
 impl ToRust for Expr {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
             Expr::RustCode(code) => {
                 let code = match mode {
@@ -137,10 +161,10 @@ impl ToRust for Expr {
                 #ident.clone()
             },
             Expr::Construction { name, fields } => {
-                let name = name.to_rust(mode)?;
+                let name = name.to_rust(mode, ctx)?;
                 let fields = fields
                     .into_iter()
-                    .map(|f| ToRust::to_rust(f, mode))
+                    .map(|f| ToRust::to_rust(f, mode, ctx))
                     .collect::<Result<Vec<_>>>()?;
                 quote! {
                     #name {
@@ -151,7 +175,7 @@ impl ToRust for Expr {
             Expr::Array(exprs) => {
                 let exprs = exprs
                     .into_iter()
-                    .map(|f| ToRust::to_rust(f, mode))
+                    .map(|f| ToRust::to_rust(f, mode, ctx))
                     .collect::<Result<Vec<_>>>()?;
                 quote! {
                     vec! [
@@ -171,7 +195,7 @@ impl ToRust for Expr {
             }
             Expr::Option(opt) => match opt {
                 Some(expr) => {
-                    let expr = expr.to_rust(mode)?;
+                    let expr = expr.to_rust(mode, ctx)?;
                     quote! {
                         Some(#expr)
                     }
@@ -182,13 +206,13 @@ impl ToRust for Expr {
             },
             Expr::Result(res) => match res {
                 ResultExpr::Ok(expr) => {
-                    let expr = expr.to_rust(mode)?;
+                    let expr = expr.to_rust(mode, ctx)?;
                     quote! {
                         Ok(#expr)
                     }
                 }
                 ResultExpr::Err(expr) => {
-                    let expr = expr.to_rust(mode)?;
+                    let expr = expr.to_rust(mode, ctx)?;
                     quote! {
                         Err(#expr)
                     }
@@ -217,7 +241,7 @@ impl ToRust for Expr {
                 }
             },
             Expr::MethodCall { value, methods } => {
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
                 let ts = TokenStream::from_str(&methods).map_err(|e| {
                     eyre!("failed to parse tokenstream for code {} : {}", methods, e)
                 })?;
@@ -228,7 +252,7 @@ impl ToRust for Expr {
             Expr::Tuple(elements) => {
                 let elements: Vec<_> = elements
                     .into_iter()
-                    .map(|e| e.to_rust(mode))
+                    .map(|e| e.to_rust(mode, ctx))
                     .try_collect()?;
 
                 quote! {
@@ -238,8 +262,8 @@ impl ToRust for Expr {
                 }
             }
             Expr::FnCall { func, args } => {
-                let func = func.to_rust(mode)?;
-                let args = args.to_rust(mode)?;
+                let func = func.to_rust(mode, ctx)?;
+                let args = args.to_rust(mode, ctx)?;
 
                 quote! {
                     #func(#args)
@@ -250,7 +274,7 @@ impl ToRust for Expr {
                     RefKind::Mut => quote! { &mut },
                     RefKind::Immut => quote! { & },
                 };
-                let expr = expr.to_rust(mode)?;
+                let expr = expr.to_rust(mode, ctx)?;
 
                 quote! {
                     #refer #expr
@@ -261,11 +285,11 @@ impl ToRust for Expr {
 }
 
 impl ToRust for Stmt {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
             Stmt::Binding { name, value } => {
                 let ident = format_ident!("{}", name);
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     let mut #ident = #value;
@@ -274,7 +298,7 @@ impl ToRust for Stmt {
             Stmt::Require { requirements } => {
                 let reqs = requirements
                     .into_iter()
-                    .map(|f| f.to_rust(mode))
+                    .map(|f| f.to_rust(mode, ctx))
                     .collect::<Result<Vec<_>>>()?;
 
                 quote! {
@@ -286,7 +310,7 @@ impl ToRust for Stmt {
             Stmt::Expect { expectations } => {
                 let exps = expectations
                     .into_iter()
-                    .map(|f| f.to_rust(mode))
+                    .map(|f| f.to_rust(mode, ctx))
                     .collect::<Result<Vec<_>>>()?;
 
                 quote! {
@@ -308,7 +332,7 @@ impl ToRust for Stmt {
             }
             Stmt::ModeSpecific { mode: m, stmts } => {
                 if mode == m {
-                    stmts.to_rust(mode)?
+                    stmts.to_rust(mode, ctx)?
                 } else {
                     quote! {}
                 }
@@ -326,7 +350,7 @@ fn command_to_guid(command: impl IdentFragment) -> Ident {
 }
 
 impl ToRust for Requirement {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match mode {
             Mode::Unit => match self {
                 Requirement::Wallet { sighash, amount: _ } => {
@@ -349,9 +373,9 @@ impl ToRust for Requirement {
                     use rand::Rng;
                     let id = sig_to_walletid(&sighash);
                     let sig = format_ident!("{}", sighash);
-                    let amount = amount.to_rust(mode)?;
+                    let amount = amount.to_rust(mode, ctx)?;
                     let signer = sig_to_signer(sig.clone());
-                    let random_tx_id: String = rand::thread_rng()
+                    let random_tx_id: String = (&mut ctx.rng)
                         .sample_iter(rand::distributions::Alphanumeric)
                         .map(char::from)
                         .take(15)
@@ -378,11 +402,11 @@ impl ToRust for Requirement {
                     }
                 }
                 Requirement::SendTx { tx, signer, guid } => {
-                    let tx = tx.to_rust(mode)?;
-                    let signer = signer.to_rust(mode)?;
+                    let tx = tx.to_rust(mode, ctx)?;
+                    let signer = signer.to_rust(mode, ctx)?;
                     let guid = match guid {
                         Some(expr) => {
-                            let expr = expr.to_rust(mode)?;
+                            let expr = expr.to_rust(mode, ctx)?;
                             quote! {
                                 Some(Nonce::from(#expr))
                             }
@@ -420,7 +444,7 @@ fn into_option(expr: Expr) -> Expr {
 }
 
 impl ToRust for Expectation {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match mode {
             Mode::Unit => match self {
                 Expectation::GetBalance { id, ret } => {
@@ -435,8 +459,8 @@ impl ToRust for Expectation {
                             Option::from(ret)
                         }
                     };
-                    let address = id.to_rust(mode)?;
-                    let ret = ret.to_rust(mode)?;
+                    let address = id.to_rust(mode, ctx)?;
+                    let ret = ret.to_rust(mode, ctx)?;
 
                     quote! {
                         {
@@ -449,19 +473,19 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::GetStateEntry { id, ret } => {
-                    let id = id.to_rust(mode)?;
+                    let id = id.to_rust(mode, ctx)?;
 
                     let ret = into_option(ret);
 
                     let ret = if let Expr::Option(o) = ret {
                         match o {
-                            Some(expr) => Expr::Option(Some(expr)).to_rust(mode)?,
+                            Some(expr) => Expr::Option(Some(expr)).to_rust(mode, ctx)?,
                             None => quote! {
                                 <Option<crate::protos::Wallet>>::None
                             },
                         }
                     } else {
-                        ret.to_rust(mode)?
+                        ret.to_rust(mode, ctx)?
                     };
 
                     quote! {
@@ -477,8 +501,10 @@ impl ToRust for Expectation {
                 Expectation::SetStateEntry { id: _, value: _ } => todo!(),
                 Expectation::DeleteStateEntry { id: _ } => todo!(),
                 Expectation::DeleteStateEntries { values } => {
-                    let entries: Vec<_> =
-                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+                    let entries: Vec<_> = values
+                        .into_iter()
+                        .map(|e| e.to_rust(mode, ctx))
+                        .try_collect()?;
                     quote! {
                         expect_delete_state_entries(
                             &mut tx_ctx,
@@ -491,8 +517,10 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::SetStateEntries { values } => {
-                    let entries: Vec<_> =
-                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+                    let entries: Vec<_> = values
+                        .into_iter()
+                        .map(|e| e.to_rust(mode, ctx))
+                        .try_collect()?;
 
                     quote! {
                         expect_set_state_entries(
@@ -506,7 +534,7 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::GetSighash { sig } => {
-                    let sig = sig.to_rust(mode)?;
+                    let sig = sig.to_rust(mode, ctx)?;
 
                     quote! {
                         {
@@ -518,7 +546,7 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::GetGuid { guid } => {
-                    let guid = guid.to_rust(mode)?;
+                    let guid = guid.to_rust(mode, ctx)?;
                     quote! {
                         {
                             let guid = #guid.clone();
@@ -529,7 +557,7 @@ impl ToRust for Expectation {
                     }
                 }
                 Expectation::Verify(ret) => {
-                    let ret = into_result(ret).to_rust(mode)?;
+                    let ret = into_result(ret).to_rust(mode, ctx)?;
                     quote! {
                         {
                             let ret = #ret;
@@ -542,16 +570,18 @@ impl ToRust for Expectation {
             },
             Mode::Integration => match self {
                 Expectation::SetStateEntry { id, value } => {
-                    let id = id.to_rust(mode)?;
-                    let value = value.to_rust(mode)?;
+                    let id = id.to_rust(mode, ctx)?;
+                    let value = value.to_rust(mode, ctx)?;
 
                     quote! {
                         expect_set_state_entry(#id.to_string(), #value.into()).unwrap();
                     }
                 }
                 Expectation::SetStateEntries { values } => {
-                    let entries: Vec<_> =
-                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+                    let entries: Vec<_> = values
+                        .into_iter()
+                        .map(|e| e.to_rust(mode, ctx))
+                        .try_collect()?;
 
                     quote! {
                         expect_set_state_entries(
@@ -566,8 +596,10 @@ impl ToRust for Expectation {
                 }
                 Expectation::DeleteStateEntry { id: _ } => todo!(),
                 Expectation::DeleteStateEntries { values } => {
-                    let entries: Vec<_> =
-                        values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
+                    let entries: Vec<_> = values
+                        .into_iter()
+                        .map(|e| e.to_rust(mode, ctx))
+                        .try_collect()?;
 
                     quote! {
                         expect_delete_state_entries(
@@ -591,18 +623,18 @@ impl ToRust for Expectation {
 }
 
 impl ToRust for MapEntry {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
             MapEntry::Pair(key, value) => {
-                let key = key.to_rust(mode)?;
-                let value = value.to_rust(mode)?;
+                let key = key.to_rust(mode, ctx)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     (#key.to_string(), #value.into())
                 }
             }
             MapEntry::Single(value) => {
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     #value
@@ -613,24 +645,24 @@ impl ToRust for MapEntry {
 }
 
 impl ToRust for StructEntry {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
             StructEntry::Pair(Field { name, value }) => {
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     #name: #value
                 }
             }
             StructEntry::Single(value) => {
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     #value
                 }
             }
             StructEntry::Update(value) => {
-                let value = value.to_rust(mode)?;
+                let value = value.to_rust(mode, ctx)?;
 
                 quote! {
                     ..#value
@@ -640,15 +672,14 @@ impl ToRust for StructEntry {
     }
 }
 
-fn new_secret() -> String {
+fn new_secret(rng: &mut impl rand::RngCore) -> String {
     use libsecp256k1::SecretKey;
-    let mut rng = rand::thread_rng();
-    let secret = SecretKey::random(&mut rng);
+    let secret = SecretKey::random(rng);
     format!("{:x}", secret)
 }
 
 impl ToRust for Descriptor {
-    fn to_rust(self, mode: Mode) -> Result<TokenStream> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         let descriptor = self;
         if let Mode::Unit = mode {
             let name = descriptor.name.to_snake_case().to_lowercase();
@@ -665,7 +696,7 @@ impl ToRust for Descriptor {
             let sighash_ids: Vec<Ident> =
                 sighashes.iter().map(|i| format_ident!("{}", i)).collect();
             let signers: Vec<Ident> = sighashes.iter().map(sig_to_signer).collect();
-            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret()).collect();
+            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret(&mut ctx.rng)).collect();
             let sighash_decls = quote! {
                 #(
                     let #signers = signer_with_secret(#secrets);
@@ -674,7 +705,7 @@ impl ToRust for Descriptor {
             };
             let tx_fee = descriptor.tx_fee;
             let tx_fee_decl = if let Some(expr) = tx_fee {
-                let tx_fee = expr.to_rust(mode)?;
+                let tx_fee = expr.to_rust(mode, ctx)?;
                 quote! {
                     let mut tx_fee = #tx_fee;
                 }
@@ -686,7 +717,7 @@ impl ToRust for Descriptor {
 
             let request = descriptor.request;
             let request_decl = if let Some(expr) = request {
-                let request = expr.to_rust(mode)?;
+                let request = expr.to_rust(mode, ctx)?;
                 quote! {
                     let mut request = #request;
                 }
@@ -705,11 +736,11 @@ impl ToRust for Descriptor {
             let stmts: Vec<_> = descriptor
                 .stmts
                 .into_iter()
-                .map(|f| ToRust::to_rust(f, mode))
+                .map(|f| ToRust::to_rust(f, mode, ctx))
                 .try_collect()?;
 
             let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
-                let err = err.to_rust(mode)?;
+                let err = err.to_rust(mode, ctx)?;
                 quote! {
                     execute_failure(command, &request, &tx_ctx, &mut ctx, #err);
                 }
@@ -760,7 +791,7 @@ impl ToRust for Descriptor {
             let sighash_ids: Vec<Ident> =
                 sighashes.iter().map(|i| format_ident!("{}", i)).collect();
             let signers: Vec<Ident> = sighashes.iter().map(sig_to_signer).collect();
-            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret()).collect();
+            let secrets: Vec<String> = sighashes.iter().map(|_| new_secret(&mut ctx.rng)).collect();
             let sighash_decls = quote! {
                 #(
                     let #signers = signer_with_secret(#secrets);
@@ -769,7 +800,7 @@ impl ToRust for Descriptor {
             };
             let tx_fee = descriptor.tx_fee;
             let tx_fee_decl = if let Some(expr) = tx_fee {
-                let tx_fee = expr.to_rust(mode)?;
+                let tx_fee = expr.to_rust(mode, ctx)?;
                 quote! {
                     let mut tx_fee = #tx_fee;
                 }
@@ -780,7 +811,7 @@ impl ToRust for Descriptor {
             };
             let request = descriptor.request;
             let request_decl = if let Some(expr) = request {
-                let request = expr.to_rust(mode)?;
+                let request = expr.to_rust(mode, ctx)?;
                 quote! {
                     let mut request = #request;
                 }
@@ -796,17 +827,17 @@ impl ToRust for Descriptor {
                 .partition(|s| matches!(s, Stmt::Expect { .. }));
             let expectations: Vec<_> = expectations
                 .into_iter()
-                .map(|f| ToRust::to_rust(f, mode))
+                .map(|f| ToRust::to_rust(f, mode, ctx))
                 .try_collect()?;
             let stmts: Vec<_> = stmts
                 .into_iter()
-                .map(|f| ToRust::to_rust(f, mode))
+                .map(|f| ToRust::to_rust(f, mode, ctx))
                 .try_collect()?;
 
-            let signer = descriptor.signer.to_rust(mode)?;
+            let signer = descriptor.signer.to_rust(mode, ctx)?;
             let guid = command_to_guid("command");
             let execute = if let TestKind::Fail(err) = descriptor.pass_fail {
-                let err = err.to_rust(mode)?;
+                let err = err.to_rust(mode, ctx)?;
                 quote! {
                     execute_failure(command, #err, ports, Some(Nonce::from(#guid.clone())), &#signer);
                 }

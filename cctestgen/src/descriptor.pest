@@ -64,7 +64,7 @@ block = { "{" ~ code ~ "}" }
 require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
 requirement = { wallet | guid | send_tx }
 guid = { "Guid" ~ "for" ~ ident }
-wallet = { "Wallet" ~ "for" ~ sighash ~ "with" ~ "amount" ~ "=" ~ expr }
+wallet = { "Wallet" ~ "for" ~ ident ~ "with" ~ "amount" ~ "=" ~ expr }
 send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr ~ ( "," ~ "guid" ~ "=" ~ expr)? }
 expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
 expectation = { get_balance | get_state | set_states | set_state | delete_state | delete_states | get_sighash | get_guid | verify }

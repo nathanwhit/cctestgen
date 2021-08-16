@@ -40,7 +40,7 @@ impl ToRust for Command {
 }
 
 fn sig_to_signer(sig: impl IdentFragment) -> Ident {
-    format_ident!("_{}_signer", sig)
+    format_ident!("{}_signer", sig)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,7 +121,7 @@ impl ToRust for Expr {
                 let ts = TokenStream::from_str(&code)
                     .map_err(|e| eyre!("failed to parse tokenstream for code {} : {}", code, e))?;
                 quote! {
-                    { #ts }
+                    #ts
                 }
             }
             Expr::Sighash(sig) => {
@@ -131,10 +131,10 @@ impl ToRust for Expr {
                 }
             }
             Expr::Default => quote! {
-                { ::core::default::Default::default() }
+                ::core::default::Default::default()
             },
             Expr::Ident(ident) => quote! {
-                { #ident.clone() }
+                #ident.clone()
             },
             Expr::Construction { name, fields } => {
                 let name = name.to_rust(mode)?;
@@ -161,23 +161,23 @@ impl ToRust for Expr {
             }
             Expr::Mapping(_) => todo!(),
             Expr::Literal(literal) => quote! {
-                { #literal }
+                #literal
             },
             Expr::WalletId(id) => {
                 let wallet_id = sig_to_walletid(id);
                 quote! {
-                    { #wallet_id.clone() }
+                    #wallet_id.clone()
                 }
             }
             Expr::Option(opt) => match opt {
                 Some(expr) => {
                     let expr = expr.to_rust(mode)?;
                     quote! {
-                        { Some(#expr) }
+                        Some(#expr)
                     }
                 }
                 None => quote! {
-                    { None }
+                    None
                 },
             },
             Expr::Result(res) => match res {
@@ -198,12 +198,12 @@ impl ToRust for Expr {
                 Some(id) => {
                     let guid = command_to_guid(id);
                     quote! {
-                        { #guid.clone() }
+                        #guid.clone()
                     }
                 }
                 None => {
                     quote! {
-                        { Guid::from(make_nonce()) }
+                        Guid::from(make_nonce())
                     }
                 }
             },
@@ -268,7 +268,7 @@ impl ToRust for Stmt {
                 let value = value.to_rust(mode)?;
 
                 quote! {
-                    let mut #ident = { #value };
+                    let mut #ident = #value;
                 }
             }
             Stmt::Require { requirements } => {
@@ -303,7 +303,7 @@ impl ToRust for Stmt {
                 let ts = TokenStream::from_str(&code).unwrap();
 
                 quote! {
-                    { #ts }
+                    #ts
                 }
             }
             Stmt::ModeSpecific { mode: m, stmts } => {
@@ -318,11 +318,11 @@ impl ToRust for Stmt {
 }
 
 fn sig_to_walletid(sig: impl IdentFragment) -> Ident {
-    format_ident!("_{}_wallet_id", sig)
+    format_ident!("{}_wallet_id_", sig)
 }
 
 fn command_to_guid(command: impl IdentFragment) -> Ident {
-    format_ident!("_{}_guid", command)
+    format_ident!("{}_guid_", command)
 }
 
 impl ToRust for Requirement {
@@ -364,8 +364,9 @@ impl ToRust for Requirement {
                         .collect();
                     quote! {
                         {
+                            let amount = #amount;
                             let collect_coins = ccprocessor_rust::handler::CollectCoins {
-                                amount: { #amount.into() },
+                                amount: amount.into(),
                                 eth_address: "dummy".into(),
                                 blockchain_tx_id: #random_tx_id.into(),
                             };
@@ -470,14 +471,13 @@ impl ToRust for Expectation {
                     };
 
                     quote! {
-                        {
-                            expect_get_state_entry(
-                                &mut tx_ctx,
-                                #id,
-                                #ret,
-                                None,
-                            );
-                        }
+                        expect_get_state_entry(
+                            &mut tx_ctx,
+                            #id,
+                            #ret,
+                            None,
+                        );
+
                     }
                 }
                 Expectation::SetStateEntry { id: _, value: _ } => todo!(),
@@ -560,16 +560,14 @@ impl ToRust for Expectation {
                         values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
 
                     quote! {
-                        {
-                            expect_set_state_entries(
-                                ports,
-                                vec![
-                                    #(
-                                        #entries
-                                    ),*
-                                ]
-                            ).unwrap();
-                        }
+                        expect_set_state_entries(
+                            ports,
+                            vec![
+                                #(
+                                    #entries
+                                ),*
+                            ]
+                        ).unwrap();
                     }
                 }
                 Expectation::DeleteStateEntry { id: _ } => todo!(),
@@ -578,16 +576,14 @@ impl ToRust for Expectation {
                         values.into_iter().map(|e| e.to_rust(mode)).try_collect()?;
 
                     quote! {
-                        {
-                            expect_delete_state_entries(
-                                ports,
-                                vec![
-                                    #(
-                                        #entries.to_string()
-                                    ),*
-                                ]
-                            ).unwrap();
-                        }
+                        expect_delete_state_entries(
+                            ports,
+                            vec![
+                                #(
+                                    #entries.to_string()
+                                ),*
+                            ]
+                        ).unwrap();
                     }
                 }
                 Expectation::GetBalance { .. }

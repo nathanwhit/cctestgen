@@ -186,7 +186,7 @@ impl Default for Expr {
 #[derive(Debug, Clone)]
 pub enum Requirement {
     Wallet {
-        sighash: Sighash,
+        sighash: Ident,
         amount: Expr,
     },
     Guid {
@@ -223,6 +223,26 @@ pub enum Stmt {
 
 pub trait ParseAst: Sized {
     fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self>;
+}
+
+impl ParseAst for Ident {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let expr = pair.expecting(Rule::ident)?;
+        match syn::parse_str(expr.as_str()) {
+            Ok(ident) => Ok(ident),
+            Err(e) => {
+                ariadne::Report::build(ariadne::ReportKind::Error, (), expr.as_span().start())
+                    .with_message(&e)
+                    .with_label(ariadne::Label::new(
+                        expr.as_span().start()..expr.as_span().end(),
+                    ))
+                    .finish()
+                    .eprint(&mut *crate::SOURCE.get().unwrap().lock().unwrap())
+                    .unwrap();
+                Err(e)?
+            }
+        }
+    }
 }
 
 impl ParseAst for Expr {
@@ -474,7 +494,7 @@ impl ParseAst for Requirement {
         match req.as_rule() {
             Rule::wallet => {
                 let mut inner = req.into_inner();
-                let sighash = Sighash::parse(inner.next())?;
+                let sighash = Ident::parse(inner.next())?;
                 let amount = Expr::parse(inner.next())?;
                 Ok(Requirement::Wallet { sighash, amount })
             }

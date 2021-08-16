@@ -127,7 +127,7 @@ impl ToRust for Expr {
             Expr::Sighash(sig) => {
                 let id = format_ident!("{}", sig.0);
                 quote! {
-                    #id .clone().into()
+                    #id .clone()
                 }
             }
             Expr::Default => quote! {
@@ -329,12 +329,9 @@ impl ToRust for Requirement {
     fn to_rust(self, mode: Mode) -> Result<TokenStream> {
         Ok(match mode {
             Mode::Unit => match self {
-                Requirement::Wallet {
-                    sighash: Sighash(sig),
-                    amount: _,
-                } => {
-                    let id = sig_to_walletid(&sig);
-                    let sig = format_ident!("{}", sig);
+                Requirement::Wallet { sighash, amount: _ } => {
+                    let id = sig_to_walletid(&sighash);
+                    let sig = format_ident!("{}", sighash);
                     quote! {
                         let #id = WalletId::from(&#sig);
                     }
@@ -348,13 +345,10 @@ impl ToRust for Requirement {
                 Requirement::SendTx { .. } => quote! {},
             },
             Mode::Integration => match self {
-                Requirement::Wallet {
-                    sighash: Sighash(sig),
-                    amount,
-                } => {
+                Requirement::Wallet { sighash, amount } => {
                     use rand::Rng;
-                    let id = sig_to_walletid(&sig);
-                    let sig = format_ident!("{}", sig);
+                    let id = sig_to_walletid(&sighash);
+                    let sig = format_ident!("{}", sighash);
                     let amount = amount.to_rust(mode)?;
                     let signer = sig_to_signer(sig.clone());
                     let random_tx_id: String = rand::thread_rng()
@@ -665,18 +659,7 @@ impl ToRust for Descriptor {
                 use std::str::FromStr as _;
             };
 
-            let fns = quote! {
-                fn wallet_with(balance: Option<impl Into<Integer> + Clone>) -> Option<Vec<u8>> {
-                    balance.map(|b| {
-                        let wallet = crate::protos::Wallet {
-                            amount: b.into().to_string(),
-                        };
-                        let mut buf = Vec::with_capacity(wallet.encoded_len());
-                        wallet.encode(&mut buf).unwrap();
-                        buf
-                    })
-                }
-            };
+            let fns = quote! {};
 
             let sighashes = descriptor.sighashes.clone();
             let sighash_ids: Vec<Ident> =

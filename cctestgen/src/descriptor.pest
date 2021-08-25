@@ -10,7 +10,11 @@ statement = {
 stmt = _{ binding | require | expect | unit | integration | rustcode }
 unit = { "unit" ~ "{" ~ statement* ~ "}" }
 integration = { "integration" ~ "{" ~ statement* ~ "}" }
-binding = { "let" ~ ident ~ "=" ~ expr }
+binding = { "let" ~ pat ~ "=" ~ expr }
+pat = { ident_pat | tuple_pat }
+tuple_pat = { "(" ~ (ident_pat ~ ("," ~ ident_pat)*)? ~ ")" }
+ident_pat = { "mut"? ~ ident }
+
 meta = {
     meta_inner ~ ";"?
 }
@@ -40,7 +44,9 @@ non_method_expr = { reference | rustcode | default | sighash | walletid | guid_f
 expr_block = { "{" ~ expr ~ "}" }
 fn_call = { path ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
 method_call = { non_method_expr ~ calls }
-calls = { ("." ~ ident ~ ("(" ~ ")")?)+ }
+calls = { (call | field_access)+ }
+field_access = { "." ~ ident }
+call = { ( "." ~ ident ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") ) }
 reference = { (mut_ref | immut_ref) ~ expr }
 mut_ref = { "&" ~ "mut" }
 immut_ref = { "&" }

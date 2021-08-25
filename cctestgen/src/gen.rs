@@ -63,16 +63,37 @@ impl TryFrom<&str> for Mode {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum CloneStrategy {
+    Insert,
+    Nothing,
+}
+
+impl ToRust for CloneStrategy {
+    fn to_rust(self, _mode: Mode, _ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        match self {
+            CloneStrategy::Insert => Ok(quote! { .clone() }),
+            CloneStrategy::Nothing => Ok(TokenStream::new()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CodegenCtx {
     rng: ChaCha12Rng,
+    clone: CloneStrategy,
 }
 
 impl CodegenCtx {
     pub fn new() -> CodegenCtx {
         CodegenCtx {
             rng: ChaCha12Rng::seed_from_u64(12345),
+            clone: CloneStrategy::Insert,
         }
+    }
+    pub fn scoped<T>(&self, func: impl FnOnce(&mut Self) -> T) -> T {
+        let mut copy = self.clone();
+        func(&mut copy)
     }
 }
 
@@ -134,8 +155,60 @@ where
     }
 }
 
+impl ToRust for MethodCall {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let MethodCall { method, args } = self;
+
+        let args = args.to_rust(mode, ctx)?;
+        Ok(quote! {
+            . #method ( #args )
+        })
+    }
+}
+
+impl ToRust for FieldAccess {
+    fn to_rust(self, _mode: Mode, _ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let FieldAccess { field } = self;
+        Ok(quote! {
+            . #field
+        })
+    }
+}
+
+impl ToRust for Vec<Postfix> {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let mut iter = self.into_iter().peekable();
+        let mut ts = TokenStream::new();
+        while let Some(item) = iter.next() {
+            match item {
+                Postfix::FieldAccess(access) => {
+                    let access = access.to_rust(mode, ctx)?;
+                    ts.extend(access);
+                    while let Some(Postfix::FieldAccess(access)) = iter.peek() {
+                        let access = access.clone().to_rust(mode, ctx)?;
+                        ts.extend(access);
+                        iter.next();
+                    }
+                    if let Some(Postfix::MethodCall(MethodCall { method, .. })) = iter.peek() {
+                        if method == "clone" {
+                            continue;
+                        }
+                    }
+                    ts.extend(quote! { .clone() });
+                }
+                Postfix::MethodCall(call) => {
+                    let call = call.to_rust(mode, ctx)?;
+                    ts.extend(call);
+                }
+            }
+        }
+        Ok(ts)
+    }
+}
+
 impl ToRust for Expr {
     fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let clone = ctx.clone.to_rust(mode, ctx)?;
         Ok(match self {
             Expr::RustCode(code) => {
                 let code = match mode {
@@ -151,14 +224,14 @@ impl ToRust for Expr {
             Expr::Sighash(sig) => {
                 let id = format_ident!("{}", sig.0);
                 quote! {
-                    #id .clone()
+                    #id #clone
                 }
             }
             Expr::Default => quote! {
                 ::core::default::Default::default()
             },
             Expr::Ident(ident) => quote! {
-                #ident.clone()
+                #ident #clone
             },
             Expr::Construction { name, fields } => {
                 let name = name.to_rust(mode, ctx)?;
@@ -240,13 +313,25 @@ impl ToRust for Expr {
                     }
                 }
             },
-            Expr::MethodCall { value, methods } => {
-                let value = value.to_rust(mode, ctx)?;
-                let ts = TokenStream::from_str(&methods).map_err(|e| {
-                    eyre!("failed to parse tokenstream for code {} : {}", methods, e)
-                })?;
+            Expr::Postfix { value, postfix } => {
+                let value = match postfix.first() {
+                    Some(Postfix::FieldAccess(_)) => ctx.scoped(|ctx| {
+                        ctx.clone = CloneStrategy::Nothing;
+                        value.to_rust(mode, ctx)
+                    }),
+                    Some(Postfix::MethodCall(MethodCall { method, .. }))
+                        if method == "to_state_entry" || method == "clone" =>
+                    {
+                        ctx.scoped(|ctx| {
+                            ctx.clone = CloneStrategy::Nothing;
+                            value.to_rust(mode, ctx)
+                        })
+                    }
+                    _ => value.to_rust(mode, ctx),
+                }?;
+                let postfix = postfix.to_rust(mode, ctx)?;
                 quote! {
-                    #value #ts
+                    #value #postfix
                 }
             }
             Expr::Tuple(elements) => {
@@ -284,15 +369,27 @@ impl ToRust for Expr {
     }
 }
 
+impl Pat {
+    fn prefixed_with(&self, ts: TokenStream) -> TokenStream {
+        match self {
+            Pat::Ident(id) => quote! {
+                #ts #id
+            },
+            Pat::Tuple(ids) => quote! {
+                ( #( #ts #ids ),* )
+            },
+        }
+    }
+}
+
 impl ToRust for Stmt {
     fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         Ok(match self {
-            Stmt::Binding { name, value } => {
-                let ident = format_ident!("{}", name);
+            Stmt::Binding { lhs, value } => {
                 let value = value.to_rust(mode, ctx)?;
-
+                let pat = lhs.prefixed_with(quote! { mut });
                 quote! {
-                    let mut #ident = #value;
+                    let #pat = #value;
                 }
             }
             Stmt::Require { requirements } => {
@@ -464,8 +561,8 @@ impl ToRust for Expectation {
 
                     quote! {
                         {
-                            let address = #address .clone();
-                            let ret = #ret .clone();
+                            let address = #address;
+                            let ret = #ret;
                             tx_ctx.expect_get_state_entry()
                                 .withf(move |addr| address.as_str() == addr)
                                 .return_once(move |_| Ok( wallet_with( #casted ) ) );
@@ -549,7 +646,7 @@ impl ToRust for Expectation {
                     let guid = guid.to_rust(mode, ctx)?;
                     quote! {
                         {
-                            let guid = #guid.clone();
+                            let guid = #guid;
 
                             ctx.expect_guid()
                                 .returning(move |_| guid.clone());
@@ -655,10 +752,16 @@ impl ToRust for StructEntry {
                 }
             }
             StructEntry::Single(value) => {
-                let value = value.to_rust(mode, ctx)?;
+                let value_ts = value.clone().to_rust(mode, ctx)?;
 
-                quote! {
-                    #value
+                if let Expr::Ident(id) = value {
+                    quote! {
+                        #id : #value_ts .clone()
+                    }
+                } else {
+                    quote! {
+                        #value_ts
+                    }
                 }
             }
             StructEntry::Update(value) => {

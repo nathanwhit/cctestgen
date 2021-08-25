@@ -5,6 +5,9 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+debug = true
+
 [dependencies]
 Inflector = "0.11.4"
 ariadne = "0.1.3"
@@ -21,7 +24,7 @@ rand = "0.7"
 rand_chacha = "0.2.1"
 strum = "0.21.0"
 strum_macros = "0.21.1"
-syn = "1.0.74"
+syn = { version = "1.0.74", features = ["full"] }
 
 [profile.dev.package.backtrace]
 opt-level = 3

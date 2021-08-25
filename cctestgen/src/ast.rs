@@ -152,7 +152,10 @@ pub enum Expr {
     Sighash(Sighash),
     Default,
     Ident(Ident),
-    Construction { name: Path, fields: Fields },
+    Construction {
+        name: Path,
+        fields: Fields,
+    },
     Array(Vec<Expr>),
     Mapping(Mapping),
     Literal(Literal),
@@ -162,9 +165,35 @@ pub enum Expr {
     Option(Option<Box<Expr>>),
     Result(ResultExpr),
     Tuple(Vec<Expr>),
-    MethodCall { value: Box<Expr>, methods: String },
-    FnCall { func: Path, args: Vec<Expr> },
-    Ref { kind: RefKind, expr: Box<Expr> },
+    Postfix {
+        value: Box<Expr>,
+        postfix: Vec<Postfix>,
+    },
+    FnCall {
+        func: Path,
+        args: Vec<Expr>,
+    },
+    Ref {
+        kind: RefKind,
+        expr: Box<Expr>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Postfix {
+    FieldAccess(FieldAccess),
+    MethodCall(MethodCall),
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldAccess {
+    pub field: Ident,
+}
+
+#[derive(Clone, Debug)]
+pub struct MethodCall {
+    pub method: Ident,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,7 +243,7 @@ pub enum Expectation {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Binding { name: String, value: Expr },
+    Binding { lhs: Pat, value: Expr },
     Require { requirements: Vec<Requirement> },
     Expect { expectations: Vec<Expectation> },
     RustCode(String),
@@ -241,6 +270,41 @@ impl ParseAst for Ident {
                     .unwrap();
                 Err(e.into())
             }
+        }
+    }
+}
+
+impl ParseAst for MethodCall {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let mut call = pair.expecting(Rule::call)?.into_inner();
+        let method = Ident::parse(call.next())?;
+        let mut args = Vec::new();
+        for arg in call {
+            args.push(Expr::parse(arg)?);
+        }
+        Ok(MethodCall { method, args })
+    }
+}
+
+impl ParseAst for FieldAccess {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting(Rule::field_access)?;
+        let field = Ident::parse(pair.into_inner().next())?;
+
+        Ok(FieldAccess { field })
+    }
+}
+
+impl ParseAst for Postfix {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pair = pair.expecting_one_of(&[Rule::call, Rule::field_access])?;
+        match pair.as_rule() {
+            Rule::call => Ok(Postfix::MethodCall(MethodCall::parse(pair)?)),
+            Rule::field_access => Ok(Postfix::FieldAccess(FieldAccess::parse(pair)?)),
+            other => unreachable!(
+                "Unexpected rule {:?} when parsing postfix: {:?}",
+                other, pair
+            ),
         }
     }
 }
@@ -364,8 +428,12 @@ impl ParseAst for Expr {
             Rule::method_call => {
                 let mut inner = expr.into_inner();
                 let value = Box::new(Expr::parse(inner.next())?);
-                let methods = inner.next().expecting(Rule::calls)?.as_str().into();
-                Ok(Expr::MethodCall { value, methods })
+                let calls = inner.next().expecting(Rule::calls)?;
+                let mut postfix = Vec::new();
+                for call in calls.into_inner() {
+                    postfix.push(Postfix::parse(call)?);
+                }
+                Ok(Expr::Postfix { value, postfix })
             }
             Rule::expr_block => Ok(Expr::parse(expr.into_inner().next())?),
             Rule::fn_call => {
@@ -603,6 +671,36 @@ impl ParseAst for Expectation {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Pat {
+    Ident(Ident),
+    Tuple(Vec<Ident>),
+}
+
+impl ParseAst for Pat {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let pat = pair.expecting(Rule::pat)?;
+        let pat_ = pat.clone();
+        let inner = pat.into_inner().next().unwrap();
+        match inner.as_rule() {
+            Rule::ident_pat => {
+                let id = inner.into_inner().next();
+                Ok(Pat::Ident(Ident::parse(id)?))
+            }
+            Rule::tuple_pat => {
+                let mut idents = Vec::new();
+                for p in inner.into_inner() {
+                    let p = p.expecting(Rule::ident_pat)?;
+                    let id = p.into_inner().next();
+                    idents.push(Ident::parse(id)?);
+                }
+                Ok(Pat::Tuple(idents))
+            }
+            other => unreachable!("unexpectedly found {:?} parsing Pat {:?}", other, pat_),
+        }
+    }
+}
+
 impl ParseAst for Stmt {
     fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
         let stmt = pair.expecting(Rule::statement)?;
@@ -611,12 +709,9 @@ impl ParseAst for Stmt {
         match next.as_rule() {
             Rule::binding => {
                 let mut inner = next.into_inner();
-                let id = inner.next().expecting(Rule::ident)?;
+                let lhs = Pat::parse(inner.next())?;
                 let value = Expr::parse(inner.next())?;
-                Ok(Stmt::Binding {
-                    name: id.as_str().to_owned(),
-                    value,
-                })
+                Ok(Stmt::Binding { lhs, value })
             }
             Rule::require => {
                 let mut requirements = Vec::new();
@@ -700,7 +795,7 @@ impl ParseAst for Descriptor {
                         Rule::command => {
                             let value = Expr::parse(m.into_inner().next())?;
                             stmts.push(Stmt::Binding {
-                                name: "command".to_string(),
+                                lhs: Pat::Ident(format_ident!("command")),
                                 value,
                             });
                             stmts.push(Stmt::Require {

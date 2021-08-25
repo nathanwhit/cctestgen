@@ -78,7 +78,7 @@ impl ToRust for CloneStrategy {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct CodegenCtx {
     rng: ChaCha12Rng,
     clone: CloneStrategy,
@@ -784,6 +784,31 @@ fn new_secret(rng: &mut impl rand::RngCore) -> String {
 impl ToRust for Descriptor {
     fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
         let descriptor = self;
+        let tip_start = descriptor
+            .stmts
+            .iter()
+            .filter_map(|s| {
+                if let Stmt::Require { requirements } = s {
+                    Some(requirements)
+                } else {
+                    None
+                }
+            })
+            .fold(2u64, |count, reqs| {
+                let mut count = count;
+                for req in reqs {
+                    if let Requirement::Wallet { .. } = req {
+                        count += 1;
+                    }
+                }
+                count
+            });
+        let tse_defined = descriptor.stmts.iter().any(|s| matches!(s, Stmt::Binding { lhs: Pat::Ident(id), ..} if id == &format_ident!("tse")));
+        let tse = if tse_defined {
+            quote! {}
+        } else {
+            quote! { let mut tse = ToStateEntryCtx::new( #tip_start ); }
+        };
         if let Mode::Unit = mode {
             let name = descriptor.name.to_snake_case().to_lowercase();
             let test_name = format_ident!("{}", name);
@@ -826,7 +851,7 @@ impl ToRust for Descriptor {
                 }
             } else {
                 quote! {
-                    let mut request = TpProcessRequest::default();
+                    let mut request = TpProcessRequest { tip: tse.tip().into(), ..Default::default() };
                 }
             };
 
@@ -857,6 +882,7 @@ impl ToRust for Descriptor {
                 #imports
                 #fns
                 #sighash_decls
+                #tse
                 #tx_fee_decl
                 #request_decl
                 #mock_setup
@@ -958,6 +984,7 @@ impl ToRust for Descriptor {
             };
             let body = quote! {
                 #sighash_decls
+                #tse
                 #tx_fee_decl
                 #request_decl
 

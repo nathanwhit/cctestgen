@@ -69,8 +69,7 @@ fn main() -> Result<()> {
     } else {
         println!(r##"#![cfg(feature = "integration-testing")]"##);
 
-        println!("mod common;");
-        println!("use common::*;");
+        println!("use super::common::*;");
     }
     for c in code {
         println!("\n{}", c);

@@ -39,8 +39,9 @@ request = {
 }
 test_type = _{ "result" ~ "=" ~ passfail }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { reference | method_call | rustcode | default | sighash | walletid | guid_for | signer_for | literal | fn_call | constructor | ident | expr_block }
-non_method_expr = { reference | rustcode | default | sighash | walletid | guid_for | signer_for | literal | fn_call | constructor | ident | expr_block }
+expr = { reference | method_call | rustcode | default | literal | pseudo_macro | fn_call | constructor | ident | expr_block }
+pseudo_macro = { ident ~ "!" ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
+non_method_expr = { reference | rustcode | default | literal | pseudo_macro | fn_call | constructor | ident | expr_block }
 expr_block = { "{" ~ expr ~ "}" }
 fn_call = { path ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
 method_call = { non_method_expr ~ calls }
@@ -60,10 +61,6 @@ ok = { ("Ok" ~ "(" ~ expr ~ ")") }
 err = { ("Err" ~ "(" ~ expr ~ ")") }
 field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
 ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
-walletid = { ("WalletId" ~ "(" ~ ident ~ ")")}
-sighash = {  ("Sighash" ~ "(" ~ ident ~ ")") }
-guid_for = { "Guid" ~ "(" ~ ident? ~ ")" }
-signer_for = { "Signer" ~ "(" ~ ident ~ ")" }
 rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
 code = ${  (!("{" | "}") ~ ANY  | block)* }
 block = { "{" ~ code ~ "}" }

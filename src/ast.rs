@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{convert::TryFrom, fmt::Display, str::FromStr};
 
 use crate::{gen::Mode, SOURCE};
 
@@ -11,55 +11,28 @@ use pest::iterators::Pair;
 
 use proc_macro2::{Ident, Literal};
 
+use derive_more::TryInto;
 use quote::{format_ident, ToTokens};
-use strum_macros::{AsRefStr, EnumString, IntoStaticStr};
 use syn::{LitBool, Path};
 
-#[derive(Debug, Clone, Copy, AsRefStr, IntoStaticStr, EnumString)]
-
-pub enum CommandKind {
-    SendFunds,
-    RegisterAddress,
-    RegisterTransfer,
-    AddAskOrder,
-    AddBidOrder,
-    AddOffer,
-    AddDealOrder,
-    CompleteDealOrder,
-    LockDealOrder,
-    CloseDealOrder,
-    Exempt,
-    AddRepaymentOrder,
-    CompleteRepaymentOrder,
-    CloseRepaymentOrder,
-    CollectCoins,
-    Housekeeping,
-}
-
 #[derive(Debug, Clone)]
-pub struct Command {
-    pub name: String,
-    pub fields: Fields,
-}
-
-#[derive(Debug, Clone)]
-pub enum TestKind {
+pub(crate) enum TestKind {
     Pass,
     Fail(Expr),
 }
 
 #[derive(Debug, Clone)]
-pub struct Descriptor {
-    pub name: String,
-    pub sighashes: Vec<String>,
-    pub signer: Expr,
-    pub tx_fee: Option<Expr>,
-    pub pass_fail: TestKind,
-    pub stmts: Vec<Stmt>,
-    pub request: Option<Expr>,
+pub(crate) struct Descriptor {
+    pub(crate) name: String,
+    pub(crate) sighashes: Vec<String>,
+    pub(crate) signer: Expr,
+    pub(crate) tx_fee: Option<Expr>,
+    pub(crate) pass_fail: TestKind,
+    pub(crate) stmts: Vec<Stmt>,
+    pub(crate) request: Option<Expr>,
 }
 
-pub trait PairExt<Inner = Self> {
+pub(crate) trait PairExt<Inner = Self> {
     fn expecting(self, rule: Rule) -> Result<Inner>;
 
     fn expecting_one_of(self, rules: &[Rule]) -> Result<Inner>;
@@ -122,34 +95,33 @@ impl<'a> PairExt<Pair<'a, Rule>> for Option<Pair<'a, Rule>> {
 type Fields = Vec<StructEntry>;
 
 #[derive(Debug, Clone)]
-pub struct Field {
-    pub name: Ident,
-    pub value: Expr,
+pub(crate) struct Field {
+    pub(crate) name: Ident,
+    pub(crate) value: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub enum StructEntry {
+pub(crate) enum StructEntry {
     Pair(Field),
     Single(Expr),
     Update(Expr),
 }
 
 #[derive(Debug, Clone)]
-pub enum ResultExpr {
+pub(crate) enum ResultExpr {
     Ok(Box<Expr>),
     Err(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RefKind {
+pub(crate) enum RefKind {
     Mut,
     Immut,
 }
 
-#[derive(Debug, Clone)]
-pub enum Expr {
+#[derive(Debug, Clone, TryInto)]
+pub(crate) enum Expr {
     RustCode(String),
-    Sighash(Sighash),
     Default,
     Ident(Ident),
     Construction {
@@ -157,11 +129,7 @@ pub enum Expr {
         fields: Fields,
     },
     Array(Vec<Expr>),
-    Mapping(Mapping),
     Literal(Literal),
-    WalletId(Ident),
-    GuidFor(Option<Ident>),
-    SignerFor(Ident),
     Option(Option<Box<Expr>>),
     Result(ResultExpr),
     Tuple(Vec<Expr>),
@@ -173,6 +141,7 @@ pub enum Expr {
         func: Path,
         args: Vec<Expr>,
     },
+    PseudoMacro(PseudoMacro),
     Ref {
         kind: RefKind,
         expr: Box<Expr>,
@@ -180,31 +149,83 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug)]
-pub enum Postfix {
+pub(crate) enum Postfix {
     FieldAccess(FieldAccess),
     MethodCall(MethodCall),
 }
 
 #[derive(Clone, Debug)]
-pub struct FieldAccess {
-    pub field: Ident,
+pub(crate) struct FieldAccess {
+    pub(crate) field: Ident,
 }
 
 #[derive(Clone, Debug)]
-pub struct MethodCall {
-    pub method: Ident,
-    pub args: Vec<Expr>,
+pub(crate) struct MethodCall {
+    pub(crate) method: Ident,
+    pub(crate) args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
-pub enum MapEntry {
+pub(crate) enum PseudoMacro {
+    SigHash(Ident),
+    WalletId(Ident),
+    Guid(Option<Ident>),
+    Signer(Ident),
+}
+
+fn from_one_arg<I>(args: Vec<Expr>) -> Result<I>
+where
+    I: TryFrom<Expr>,
+    <I as TryFrom<Expr>>::Error: Display,
+{
+    if args.len() != 1 {
+        return Err(eyre!("expected one argument: found {:?}", args));
+    }
+    I::try_from(args.into_iter().next().unwrap())
+        .map_err(|e| eyre!("argument was of incorrect type: {}", e))
+}
+
+impl ParseAst for PseudoMacro {
+    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
+        let mac = pair.expecting(Rule::pseudo_macro)?;
+        let mut inner = mac.into_inner();
+        let ident = Ident::parse(inner.next())?;
+        let mut args: Vec<Expr> = Vec::new();
+        for arg in inner {
+            args.push(Expr::parse(arg)?);
+        }
+
+        if ident == "SigHash" {
+            let id = from_one_arg(args)?;
+            Ok(PseudoMacro::SigHash(id))
+        } else if ident == "WalletId" {
+            let id = from_one_arg(args)?;
+            Ok(PseudoMacro::WalletId(id))
+        } else if ident == "Guid" {
+            if args.is_empty() {
+                Ok(PseudoMacro::Guid(None))
+            } else {
+                let id = from_one_arg(args)?;
+                Ok(PseudoMacro::Guid(Some(id)))
+            }
+        } else if ident == "Signer" {
+            let id = from_one_arg(args)?;
+            Ok(PseudoMacro::Signer(id))
+        } else {
+            Err(eyre!("Unrecognized macro: {:?}", ident))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum MapEntry {
     Pair(Expr, Expr),
     Single(Expr),
 }
-pub type Mapping = Vec<MapEntry>;
+pub(crate) type Mapping = Vec<MapEntry>;
 
 #[derive(Debug, Clone)]
-pub struct Sighash(pub String);
+pub(crate) struct Sighash(pub(crate) String);
 
 impl Default for Expr {
     fn default() -> Self {
@@ -213,7 +234,7 @@ impl Default for Expr {
 }
 
 #[derive(Debug, Clone)]
-pub enum Requirement {
+pub(crate) enum Requirement {
     Wallet {
         sighash: Ident,
         amount: Expr,
@@ -229,7 +250,7 @@ pub enum Requirement {
 }
 
 #[derive(Debug, Clone)]
-pub enum Expectation {
+pub(crate) enum Expectation {
     GetBalance { id: Expr, ret: Expr },
     GetStateEntry { id: Expr, ret: Expr },
     SetStateEntry { id: Expr, value: Expr },
@@ -242,7 +263,7 @@ pub enum Expectation {
 }
 
 #[derive(Debug, Clone)]
-pub enum Stmt {
+pub(crate) enum Stmt {
     Binding { lhs: Pat, value: Expr },
     Require { requirements: Vec<Requirement> },
     Expect { expectations: Vec<Expectation> },
@@ -250,7 +271,7 @@ pub enum Stmt {
     ModeSpecific { mode: Mode, stmts: Vec<Stmt> },
 }
 
-pub trait ParseAst: Sized {
+pub(crate) trait ParseAst: Sized {
     fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self>;
 }
 
@@ -322,7 +343,6 @@ impl ParseAst for Expr {
 
                 Ok(Expr::RustCode(code.into()))
             }
-            Rule::sighash => Ok(Expr::Sighash(Sighash::parse(expr)?)),
             Rule::literal => {
                 let next = expr.into_inner().next().unwrap();
                 match next.as_rule() {
@@ -409,21 +429,6 @@ impl ParseAst for Expr {
                     Err(e.into())
                 }
             },
-            Rule::walletid => Ok(Expr::WalletId(syn::parse_str(
-                expr.into_inner().next().expecting(Rule::ident)?.as_str(),
-            )?)),
-            Rule::guid_for => {
-                let cmd = if let Some(next) = expr.into_inner().next() {
-                    let id = next.expecting(Rule::ident)?;
-                    syn::parse_str(id.as_str())?
-                } else {
-                    None
-                };
-                Ok(Expr::GuidFor(cmd))
-            }
-            Rule::signer_for => Ok(Expr::SignerFor(syn::parse_str(
-                expr.into_inner().next().expecting(Rule::ident)?.as_str(),
-            )?)),
             Rule::default => Ok(Expr::Default),
             Rule::method_call => {
                 let mut inner = expr.into_inner();
@@ -436,6 +441,7 @@ impl ParseAst for Expr {
                 Ok(Expr::Postfix { value, postfix })
             }
             Rule::expr_block => Ok(Expr::parse(expr.into_inner().next())?),
+            Rule::pseudo_macro => Ok(Expr::PseudoMacro(PseudoMacro::parse(expr)?)),
             Rule::fn_call => {
                 let mut inner = expr.into_inner();
                 let func = syn::parse_str(inner.next().expecting(Rule::path)?.as_str())?;
@@ -535,19 +541,6 @@ impl ParseAst for MapEntry {
             }
             other => unreachable!("Unexpected rule {:?}", other),
         }
-    }
-}
-
-impl ParseAst for Sighash {
-    fn parse<'a>(pair: impl PairExt<Pair<'a, Rule>>) -> Result<Self> {
-        let sig = pair.expecting(Rule::sighash)?;
-        let id = sig
-            .into_inner()
-            .next()
-            .expecting(Rule::ident)?
-            .as_str()
-            .to_owned();
-        Ok(Sighash(id))
     }
 }
 
@@ -672,7 +665,7 @@ impl ParseAst for Expectation {
 }
 
 #[derive(Clone, Debug)]
-pub enum Pat {
+pub(crate) enum Pat {
     Ident(Ident),
     Tuple(Vec<Ident>),
 }

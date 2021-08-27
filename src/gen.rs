@@ -22,31 +22,12 @@ impl ToRust for Field {
     }
 }
 
-impl ToRust for Command {
-    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
-        let Command { name, fields } = self;
-        let name: syn::Path = syn::parse_str(&name)?;
-        let fields = fields
-            .into_iter()
-            .map(|f| ToRust::to_rust(f, mode, ctx))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(quote! {
-            #name {
-                #(
-                    #fields
-                ),*
-            }
-        })
-    }
-}
-
 fn sig_to_signer(sig: impl IdentFragment) -> Ident {
     format_ident!("{}_signer", sig)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
+pub(crate) enum Mode {
     Integration,
     Unit,
 }
@@ -64,7 +45,7 @@ impl TryFrom<&str> for Mode {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum CloneStrategy {
+pub(crate) enum CloneStrategy {
     Insert,
     Nothing,
 }
@@ -79,19 +60,21 @@ impl ToRust for CloneStrategy {
 }
 
 #[derive(Debug, Clone)]
-pub struct CodegenCtx {
+pub(crate) struct CodegenCtx {
     rng: ChaCha12Rng,
     clone: CloneStrategy,
+    tse_name: Ident,
 }
 
 impl CodegenCtx {
-    pub fn new() -> CodegenCtx {
+    pub(crate) fn new() -> CodegenCtx {
         CodegenCtx {
             rng: ChaCha12Rng::seed_from_u64(12345),
             clone: CloneStrategy::Insert,
+            tse_name: format_ident!("tse"),
         }
     }
-    pub fn scoped<T>(&self, func: impl FnOnce(&mut Self) -> T) -> T {
+    pub(crate) fn scoped<T>(&self, func: impl FnOnce(&mut Self) -> T) -> T {
         let mut copy = self.clone();
         func(&mut copy)
     }
@@ -103,7 +86,7 @@ impl Default for CodegenCtx {
     }
 }
 
-pub trait ToRust {
+pub(crate) trait ToRust {
     fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream>;
 }
 
@@ -221,12 +204,6 @@ impl ToRust for Expr {
                     #ts
                 }
             }
-            Expr::Sighash(sig) => {
-                let id = format_ident!("{}", sig.0);
-                quote! {
-                    #id #clone
-                }
-            }
             Expr::Default => quote! {
                 ::core::default::Default::default()
             },
@@ -256,16 +233,9 @@ impl ToRust for Expr {
                     ]
                 }
             }
-            Expr::Mapping(_) => todo!(),
             Expr::Literal(literal) => quote! {
                 #literal
             },
-            Expr::WalletId(id) => {
-                let wallet_id = sig_to_walletid(id);
-                quote! {
-                    #wallet_id.clone()
-                }
-            }
             Expr::Option(opt) => match opt {
                 Some(expr) => {
                     let expr = expr.to_rust(mode, ctx)?;
@@ -291,28 +261,6 @@ impl ToRust for Expr {
                     }
                 }
             },
-            Expr::GuidFor(cmd) => match cmd {
-                Some(id) => {
-                    let guid = command_to_guid(id);
-                    quote! {
-                        #guid.clone()
-                    }
-                }
-                None => {
-                    quote! {
-                        Guid::from(make_nonce())
-                    }
-                }
-            },
-            Expr::SignerFor(sig) => match mode {
-                Mode::Unit => quote! {},
-                Mode::Integration => {
-                    let signer = sig_to_signer(sig);
-                    quote! {
-                        #signer
-                    }
-                }
-            },
             Expr::Postfix { value, postfix } => {
                 let value = match postfix.first() {
                     Some(Postfix::FieldAccess(_)) => ctx.scoped(|ctx| {
@@ -320,7 +268,7 @@ impl ToRust for Expr {
                         value.to_rust(mode, ctx)
                     }),
                     Some(Postfix::MethodCall(MethodCall { method, .. }))
-                        if method == "to_state_entry" || method == "clone" =>
+                        if method == "state_entry_from" || method == "clone" =>
                     {
                         ctx.scoped(|ctx| {
                             ctx.clone = CloneStrategy::Nothing;
@@ -354,6 +302,7 @@ impl ToRust for Expr {
                     #func(#args)
                 }
             }
+            Expr::PseudoMacro(p) => p.to_rust(mode, ctx)?,
             Expr::Ref { kind, expr } => {
                 let refer = match kind {
                     RefKind::Mut => quote! { &mut },
@@ -379,6 +328,47 @@ impl Pat {
                 ( #( #ts #ids ),* )
             },
         }
+    }
+}
+
+impl ToRust for PseudoMacro {
+    fn to_rust(self, mode: Mode, ctx: &mut CodegenCtx) -> Result<TokenStream> {
+        let clone = ctx.clone.to_rust(mode, ctx)?;
+        Ok(match self {
+            PseudoMacro::SigHash(id) => {
+                quote! {
+                    #id #clone
+                }
+            }
+            PseudoMacro::WalletId(id) => {
+                let wallet_id = sig_to_walletid(id);
+                quote! {
+                    #wallet_id.clone()
+                }
+            }
+            PseudoMacro::Guid(cmd) => match cmd {
+                Some(id) => {
+                    let guid = command_to_guid(id);
+                    quote! {
+                        #guid.clone()
+                    }
+                }
+                None => {
+                    quote! {
+                        Guid::from(make_nonce())
+                    }
+                }
+            },
+            PseudoMacro::Signer(sig) => match mode {
+                Mode::Unit => quote! {},
+                Mode::Integration => {
+                    let signer = sig_to_signer(sig);
+                    quote! {
+                        #signer
+                    }
+                }
+            },
+        })
     }
 }
 
@@ -809,10 +799,9 @@ impl ToRust for Descriptor {
         } else {
             quote! { let mut tse = ToStateEntryCtx::new( #tip_start ); }
         };
+        let name = descriptor.name.to_snake_case().to_lowercase();
+        let test_name = format_ident!("{}", name);
         if let Mode::Unit = mode {
-            let name = descriptor.name.to_snake_case().to_lowercase();
-            let test_name = format_ident!("{}", name);
-
             let imports = quote! {
                 use crate::handler::types::*;
                 use std::str::FromStr as _;
@@ -900,9 +889,6 @@ impl ToRust for Descriptor {
             };
             Ok(decl)
         } else {
-            let name = descriptor.name.to_snake_case().to_lowercase();
-            let test_name = format_ident!("{}", name);
-
             let imports = quote! {
                 use rug::Integer;
                 use ccprocessor_rust::handler::*;

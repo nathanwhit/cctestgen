@@ -18,7 +18,7 @@ ident_pat = { "mut"? ~ ident }
 meta = {
     meta_inner ~ ";"?
 }
-meta_inner = _{  (testname | sighashes | command | tx_fee | test_type | request | signer) }
+meta_inner = _{  (testname | sighashes | command | tx_fee | test_type | request | signer | guid_meta) }
 testname = {
     "name" ~ "=" ~ string
 }
@@ -36,6 +36,9 @@ tx_fee = {
 }
 request = {
     "request" ~ "=" ~ expr
+}
+guid_meta = {
+    "guid" ~ "=" ~ expr
 }
 test_type = _{ "result" ~ "=" ~ passfail }
 passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }

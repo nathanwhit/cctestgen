@@ -763,6 +763,8 @@ impl ParseAst for Descriptor {
         let mut stmts = Vec::new();
         let mut request = None;
         let mut signer = None;
+        let mut explicit_guid = false;
+        let mut command_idx = 0;
 
         for pair in pairs {
             if let Rule::statement = pair.as_rule() {
@@ -787,15 +789,19 @@ impl ParseAst for Descriptor {
                         }
                         Rule::command => {
                             let value = Expr::parse(m.into_inner().next())?;
+                            command_idx = stmts.len();
                             stmts.push(Stmt::Binding {
                                 lhs: Pat::Ident(format_ident!("command")),
                                 value,
                             });
-                            stmts.push(Stmt::Require {
-                                requirements: vec![Requirement::Guid {
-                                    id: format_ident!("{}", "command"),
-                                }],
-                            })
+                        }
+                        Rule::guid_meta => {
+                            let value = Expr::parse(m.into_inner().next())?;
+                            stmts.push(Stmt::Binding {
+                                lhs: Pat::Ident(super::gen::command_to_guid("command")),
+                                value,
+                            });
+                            explicit_guid = true;
                         }
                         Rule::tx_fee => {
                             let expr = m.into_inner().next().expecting(Rule::expr)?;
@@ -829,6 +835,16 @@ impl ParseAst for Descriptor {
             } else {
                 panic!("Bad {:?}", pair);
             }
+        }
+        if !explicit_guid {
+            stmts.insert(
+                command_idx + 1,
+                Stmt::Require {
+                    requirements: vec![Requirement::Guid {
+                        id: format_ident!("{}", "command"),
+                    }],
+                },
+            );
         }
         Ok(Descriptor {
             name: name.ok_or_else(|| eyre!("Must specify the name of the test"))?,

@@ -432,7 +432,7 @@ fn sig_to_walletid(sig: impl IdentFragment) -> Ident {
     format_ident!("{}_wallet_id_", sig)
 }
 
-fn command_to_guid(command: impl IdentFragment) -> Ident {
+pub(crate) fn command_to_guid(command: impl IdentFragment) -> Ident {
     format_ident!("{}_guid_", command)
 }
 

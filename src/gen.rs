@@ -932,7 +932,7 @@ impl ToRust for Descriptor {
                 }
             } else {
                 quote! {
-                    let mut request = TpProcessRequest::default();
+                    let mut request = TpProcessRequest { tip: tse.tip().into(), ..Default::default() };
                 }
             };
 

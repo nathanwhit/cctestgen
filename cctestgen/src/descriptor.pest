@@ -19,52 +19,10 @@ meta = {
     meta_inner ~ ";"?
 }
 meta_inner = _{  (testname | sighashes | command | tx_fee | test_type | request | signer) }
-testname = {
-    "name" ~ "=" ~ string
-}
-sighashes = {
-    "sighashes" ~ "=" ~ (("[" ~ "]") | ("[" ~ ident ~ ("," ~ ident)* ~ "]"))
-}
-command = {
-    "command" ~ "=" ~ expr
-}
-signer = {
-    "signer" ~ "=" ~ expr
-}
-tx_fee = {
-    "tx_fee" ~ "=" ~ expr
-}
-request = {
-    "request" ~ "=" ~ expr
-}
-test_type = _{ "result" ~ "=" ~ passfail }
-passfail = { "pass" | ("fail" ~ "(" ~ "err" ~ "=" ~ expr ~ ")") }
-expr = { reference | method_call | rustcode | default | literal | pseudo_macro | fn_call | constructor | ident | expr_block }
+expr = {rustcode | default | pseudo_macro }
 pseudo_macro = { ident ~ "!" ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
-non_method_expr = { reference | rustcode | default | literal | pseudo_macro | fn_call | constructor | ident | expr_block }
-expr_block = { "{" ~ expr ~ "}" }
-fn_call = { path ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
-method_call = { non_method_expr ~ calls }
-calls = { (call | field_access)+ }
-field_access = { "." ~ ident }
-call = { ( "." ~ ident ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") ) }
-reference = { (mut_ref | immut_ref) ~ expr }
-mut_ref = { "&" ~ "mut" }
-immut_ref = { "&" }
-default = { "default" }
-literal = { owned_string | string | number | array | option | bool | result | tuple }
-tuple = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
-bool = { "true" | "false" }
-option = { ("Some" ~ "(" ~ expr ~ ")") | "None" }
-result = { ok | err }
-ok = { ("Ok" ~ "(" ~ expr ~ ")") }
-err = { ("Err" ~ "(" ~ expr ~ ")") }
-field = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
-ident = @{ ( ASCII_ALPHANUMERIC | "-" | "_" )+ }
-rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
-code = ${  (!("{" | "}") ~ ANY  | block)* }
-block = { "{" ~ code ~ "}" }
 require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
+rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
 requirement = { wallet | guid | send_tx }
 guid = { "Guid" ~ "for" ~ ident }
 wallet = { "Wallet" ~ "for" ~ ident ~ "with" ~ "amount" ~ "=" ~ expr }
@@ -81,40 +39,4 @@ get_guid = { "guid" ~ "->" ~ expr }
 delete_state = { "delete" ~ "state" ~ "at" ~ expr }
 delete_states = { "delete" ~ "states" ~ array }
 
-
-path = { ident ~ ("::" ~ ident)* }
-constructor = { path ~ struct_map }
-struct_map = {
-    ("{" ~ "}") |
-    ("{" ~ struct_pair ~ ("," ~ struct_pair)* ~ ","? ~ "}")
-}
-struct_pair = { field_pair | short | update }
-field_pair = { ident ~ ":" ~ expr }
-update = {  "." ~ "." ~ expr }
-mapping = {
-    ("{" ~ "}") |
-    ("{" ~ pair ~ ("," ~ pair)* ~ (",")? ~ "}")
-}
-pair = { (expr ~ ":" ~ expr) | short }
-short = { expr }
-
-
-string = ${ "\"" ~ inner ~ "\"" }
 owned_string = { "s" ~ string }
-inner = @{ char* }
-char = {
-    !("\"" | "\\") ~ ANY
-    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
-    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
-}
-number = @{
-    "-"?
-    ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)
-    // ~ ("." ~ ASCII_DIGIT*)?
-    // ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
-    ~ (ASCII_ALPHANUMERIC+)?
-}
-array = {
-    "[" ~ "]" |
-    "[" ~ expr ~ (("," ~ expr)* ~ ","?)? ~ "]"
-}

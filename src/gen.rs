@@ -840,6 +840,7 @@ impl ToRust for Descriptor {
             };
 
             let request = descriptor.request;
+            let explicit_request = request.is_some();
             let request_decl = if let Some(expr) = request {
                 let request = expr.to_rust(mode, ctx)?;
                 quote! {
@@ -874,16 +875,27 @@ impl ToRust for Descriptor {
                 }
             };
 
+            let stmts = if explicit_request {
+                quote! {
+                    #request_decl
+                    #( #stmts )*
+                }
+            } else {
+                quote! {
+                    #( #stmts )*
+                    #request_decl
+                }
+            };
+
             let body = quote! {
                 #imports
                 #fns
                 #sighash_decls
                 #tse
                 #tx_fee_decl
-                #request_decl
                 #mock_setup
 
-                #( #stmts )*
+                #stmts
 
                 #execute
             };

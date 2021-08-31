@@ -5,7 +5,7 @@ descriptors = { SOI ~ descriptor ~ ("---" ~ descriptor)* ~ EOI }
 descriptor = { top_statement+ }
 top_statement = _ { meta | statement }
 statement = {
-    stmt ~ ";"?
+    (stmt ~ ";"?) | (expr ~ ";")
 }
 stmt = _{ binding | require | expect | unit | integration | rustcode }
 unit = { "unit" ~ "{" ~ statement* ~ "}" }

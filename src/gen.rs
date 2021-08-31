@@ -394,6 +394,13 @@ impl ToRust for Stmt {
                     )*
                 }
             }
+            Stmt::Expr(expr) => {
+                let expr = expr.to_rust(mode, ctx)?;
+
+                quote! {
+                    #expr;
+                }
+            }
             Stmt::Expect { expectations } => {
                 let exps = expectations
                     .into_iter()
@@ -784,7 +791,7 @@ impl ToRust for Descriptor {
                     None
                 }
             })
-            .fold(2u64, |count, reqs| {
+            .fold(1u64, |count, reqs| {
                 let mut count = count;
                 for req in reqs {
                     if let Requirement::Wallet { .. } = req {
@@ -932,7 +939,7 @@ impl ToRust for Descriptor {
                 }
             } else {
                 quote! {
-                    let mut request = TpProcessRequest { tip: tse.tip().into(), ..Default::default() };
+                    let mut request = TpProcessRequest { tip: u64::from(tse.tip()), ..Default::default() };
                 }
             };
 

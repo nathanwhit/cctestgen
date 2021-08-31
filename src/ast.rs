@@ -269,6 +269,7 @@ pub(crate) enum Stmt {
     Expect { expectations: Vec<Expectation> },
     RustCode(String),
     ModeSpecific { mode: Mode, stmts: Vec<Stmt> },
+    Expr(Expr),
 }
 
 pub(crate) trait ParseAst: Sized {
@@ -723,6 +724,10 @@ impl ParseAst for Stmt {
             Rule::code => {
                 let code = next.as_str();
                 Ok(Stmt::RustCode(code.into()))
+            }
+            Rule::expr => {
+                let expr = Expr::parse(next)?;
+                Ok(Stmt::Expr(expr))
             }
             Rule::integration => {
                 let inner = next.into_inner();

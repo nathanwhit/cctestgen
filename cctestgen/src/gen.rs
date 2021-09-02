@@ -1,6 +1,6 @@
-// use std::{convert::TryFrom, str::FromStr};
+use std::{convert::TryFrom, str::FromStr};
 
-// use color_eyre::eyre::eyre;
+use color_eyre::eyre::eyre;
 // use color_eyre::Result;
 // use inflector::Inflector;
 // use itertools::Itertools;
@@ -26,23 +26,23 @@
 //     format_ident!("{}_signer", sig)
 // }
 
-// #[derive(Clone, Copy, Debug, PartialEq)]
-// pub(crate) enum Mode {
-//     Integration,
-//     Unit,
-// }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Mode {
+    Integration,
+    Unit,
+}
 
-// impl TryFrom<&str> for Mode {
-//     type Error = color_eyre::Report;
+impl TryFrom<&str> for Mode {
+    type Error = color_eyre::Report;
 
-//     fn try_from(value: &str) -> Result<Self, Self::Error> {
-//         match &*value.trim().to_ascii_lowercase() {
-//             "integration" => Ok(Mode::Integration),
-//             "unit" => Ok(Mode::Unit),
-//             other => Err(eyre!("Invalid mode: {}", &other)),
-//         }
-//     }
-// }
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match &*value.trim().to_ascii_lowercase() {
+            "integration" => Ok(Mode::Integration),
+            "unit" => Ok(Mode::Unit),
+            other => Err(eyre!("Invalid mode: {}", &other)),
+        }
+    }
+}
 
 // #[derive(Clone, Copy, Debug)]
 // pub(crate) enum CloneStrategy {

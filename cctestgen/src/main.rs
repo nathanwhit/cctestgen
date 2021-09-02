@@ -3,8 +3,9 @@ pub mod gen;
 pub mod parser;
 
 // use ast::{Descriptor, PairExt};
-// use gen::{Mode, ToRust};
+use gen::Mode;
 use once_cell::sync::OnceCell;
+use proc_macro2::TokenStream;
 
 use std::{convert::TryFrom, fs, sync::Mutex};
 
@@ -12,6 +13,8 @@ use clap::{crate_version, Arg};
 use color_eyre::{eyre::Context, Result};
 
 use pest::Parser;
+
+use crate::parser::Descriptors;
 
 // pub mod parse {
 
@@ -31,6 +34,7 @@ use pest::Parser;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    pretty_env_logger::init();
     let app = clap::App::new("cctestgen")
         .version(crate_version!())
         .arg(Arg::with_name("filename").help("Input file").required(true))
@@ -48,11 +52,14 @@ fn main() -> Result<()> {
 
     // let _ = FILENAME.set(file.into());
 
-    // let contents = fs::read_to_string(file)
-    //     .wrap_err_with(|| color_eyre::eyre::eyre!("failed to read file {}", file))?;
+    let contents = fs::read_to_string(file)
+        .wrap_err_with(|| color_eyre::eyre::eyre!("failed to read file {}", file))?;
     // let _ = SOURCE.set(Mutex::new(ariadne::Source::from(&contents)));
-    // let mode = Mode::try_from(mode)?;
-
+    let mode = Mode::try_from(mode)?;
+    let f: TokenStream =
+        std::str::FromStr::from_str(&contents).map_err(|e| color_eyre::eyre::eyre!("{:?}", e))?;
+    let result: syn::Result<Descriptors> = syn::parse2(f);
+    println!("{:?}", result);
     // let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;
     // let descriptors = result.next().expecting(Rule::descriptors)?;
     // let mut code = Vec::new();

@@ -173,21 +173,13 @@ pub fn derive_foldable(input: TokenStream) -> TokenStream {
     let imp = match data {
         syn::Data::Struct(s) => {
             let tuple_struct = matches!(s.fields, Fields::Unnamed(_));
-            if s.fields.len() == 1 {
+            if s.fields.len() == 1 && tuple_struct {
                 let field = s.fields.into_iter().next().unwrap();
                 let ty = field.ty;
-                if tuple_struct {
-                    quote! {
-                        Self(<#ty as Foldable>::fold_with(self.0, folder))
-                    }
-                } else {
-                    let id = field.ident.unwrap();
-                    quote! {
-                        Self {
-                            #id : <#ty as Foldable>::fold_with(self.#id, folder)
-                        }
-                    }
+                quote! {
+                    Self(<#ty as Foldable>::fold_with(self.0, folder))
                 }
+                
             } else {
                 let mut fields = proc_macro2::TokenStream::new();
                 let mut count = 0;

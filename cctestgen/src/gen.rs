@@ -1,6 +1,19 @@
-use std::{convert::TryFrom, str::FromStr};
+pub(crate) mod to_rust;
+pub(crate) mod lower;
+
+use std::{convert::TryFrom, ops::Deref, str::FromStr};
 
 use color_eyre::eyre::eyre;
+use derive_more::{Deref, DerefMut};
+use inflector::Inflector;
+use itertools::Itertools;
+use quote::{format_ident, quote, IdentFragment, ToTokens};
+use rand::SeedableRng;
+use rand_chacha::ChaCha12Rng;
+use syn::{parse_quote, visit::Visit, Expr, Ident};
+use tap::{Pipe, Tap, TapFallible};
+
+use crate::parser::{self, AstVisit, Descriptor, PassFail, Requirement, Statement, Visitable};
 // use color_eyre::Result;
 // use inflector::Inflector;
 // use itertools::Itertools;
@@ -26,6 +39,24 @@ use color_eyre::eyre::eyre;
 //     format_ident!("{}_signer", sig)
 // }
 
+use paste::paste;
+
+macro_rules! integration {
+    ($self: ident, $($field: ident : $typ: ty),+) => {
+        $(
+            let $field = $self.inner.$field.clone().integration();
+        ),+
+    };
+}
+
+macro_rules! unit {
+    ($self: ident, $($field: ident),+) => {
+        $(
+            let $field = $self.inner.$field.unit();
+        ),+
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
     Integration,
@@ -43,6 +74,32 @@ impl TryFrom<&str> for Mode {
         }
     }
 }
+
+pub(crate) trait ModeWrap: Sized {
+    fn integration(self) -> Integration<Self>;
+    fn unit(self) -> Unit<Self>;
+}
+
+#[derive(Deref, DerefMut)]
+pub(crate) struct Integration<T> {
+    pub(crate) inner: T,
+}
+
+#[derive(Deref, DerefMut)]
+pub(crate) struct Unit<T> {
+    pub(crate) inner: T,
+}
+
+impl<T> ModeWrap for T {
+    fn integration(self) -> Integration<Self> {
+        Integration { inner: self }
+    }
+
+    fn unit(self) -> Unit<Self> {
+        Unit { inner: self }
+    }
+}
+
 
 // #[derive(Clone, Copy, Debug)]
 // pub(crate) enum CloneStrategy {

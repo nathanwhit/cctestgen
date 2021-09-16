@@ -1,3 +1,4 @@
+#![allow(unused)]
 pub(crate) mod ast;
 pub(crate) mod gen;
 pub(crate) mod parser;

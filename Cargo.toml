@@ -1,0 +1,8 @@
+[workspace]
+members = ["cctestgen", "cctestgen-internal-macros"]
+
+[profile.release]
+debug = true
+
+[profile.dev.package.backtrace]
+opt-level = 3

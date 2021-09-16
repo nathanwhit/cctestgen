@@ -1,7 +1,9 @@
+#![allow(unused)]
 pub mod ast;
 pub mod gen;
 pub mod parser;
 
+use ariadne::{Label, Source};
 // use ast::{Descriptor, PairExt};
 use gen::Mode;
 use once_cell::sync::OnceCell;
@@ -14,7 +16,7 @@ use color_eyre::{eyre::Context, Result};
 
 use pest::Parser;
 
-use crate::parser::Descriptors;
+use crate::parser::{Descriptors, Foldable};
 
 // pub mod parse {
 
@@ -59,7 +61,24 @@ fn main() -> Result<()> {
     let f: TokenStream =
         std::str::FromStr::from_str(&contents).map_err(|e| color_eyre::eyre::eyre!("{:?}", e))?;
     let result: syn::Result<Descriptors> = syn::parse2(f);
-    println!("{:?}", result);
+    match result {
+        Ok(res) => {
+           
+            println!("{:#?}", res.descriptors[0]);
+        }
+        Err(e) => {
+            let parser_span = parser::Span::from_span(&contents, e.span());
+            ariadne::Report::build(ariadne::ReportKind::Error, (), parser_span.lo)
+                .with_message(e)
+                .with_label(
+                    Label::new(parser_span.lo..parser_span.hi).with_message("At this location"),
+                )
+                .finish()
+                .eprint(Source::from(&contents))?;
+            // log::error!("{} at {:?}", e, parser_span);
+        }
+    }
+    // println!("{:?}", result);
     // let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;
     // let descriptors = result.next().expecting(Rule::descriptors)?;
     // let mut code = Vec::new();

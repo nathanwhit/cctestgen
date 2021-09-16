@@ -10,33 +10,5 @@ statement = {
 stmt = _{ binding | require | expect | unit | integration | rustcode }
 unit = { "unit" ~ "{" ~ statement* ~ "}" }
 integration = { "integration" ~ "{" ~ statement* ~ "}" }
-binding = { "let" ~ pat ~ "=" ~ expr }
-pat = { ident_pat | tuple_pat }
-tuple_pat = { "(" ~ (ident_pat ~ ("," ~ ident_pat)*)? ~ ")" }
-ident_pat = { "mut"? ~ ident }
-
-meta = {
-    meta_inner ~ ";"?
-}
-meta_inner = _{  (testname | sighashes | command | tx_fee | test_type | request | signer) }
 expr = {rustcode | default | pseudo_macro }
 pseudo_macro = { ident ~ "!" ~ ("(" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ ")") }
-require = { "require" ~ "(" ~ ((requirement ~ ",")* ~ requirement? ) ~ ")" }
-rustcode = _{ ("rust" ~ "{" ~ code ~ "}") }
-requirement = { wallet | guid | send_tx }
-guid = { "Guid" ~ "for" ~ ident }
-wallet = { "Wallet" ~ "for" ~ ident ~ "with" ~ "amount" ~ "=" ~ expr }
-send_tx = { "send" ~ "transaction" ~ "="? ~ expr ~ "with" ~ "signer" ~ "="? ~ expr ~ ( "," ~ "guid" ~ "=" ~ expr)? }
-expect = { "expect" ~ "(" ~ ((expectation ~ ",")* ~ expectation? ) ~ ")"}
-expectation = { get_balance | get_state | set_states | set_state | delete_state | delete_states | get_sighash | get_guid | verify }
-verify = { "verify" ~ "->" ~ expr }
-get_balance = { "get" ~ "balance" ~ "at" ~ expr ~ "->" ~ expr }
-get_state = { "get" ~ "state" ~ "at" ~ expr ~ "->" ~ expr }
-set_state = { "set" ~ "state" ~ "at" ~ expr ~ "to" ~ expr }
-set_states = { "set" ~ "states" ~ mapping }
-get_sighash = { "sighash" ~ "->" ~ expr }
-get_guid = { "guid" ~ "->" ~ expr }
-delete_state = { "delete" ~ "state" ~ "at" ~ expr }
-delete_states = { "delete" ~ "states" ~ array }
-
-owned_string = { "s" ~ string }

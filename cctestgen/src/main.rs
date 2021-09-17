@@ -1,22 +1,15 @@
-#![allow(unused)]
+// #![allow(unused)]
 pub mod ast;
 pub mod gen;
 pub mod parser;
 
-use ariadne::{Label, Source};
 // use ast::{Descriptor, PairExt};
 use gen::Mode;
-use once_cell::sync::OnceCell;
-use proc_macro2::TokenStream;
 
-use std::{convert::TryFrom, fs, sync::Mutex};
+use std::{convert::TryFrom, fs};
 
 use clap::{crate_version, Arg};
 use color_eyre::{eyre::Context, Result};
-
-use pest::Parser;
-
-use crate::parser::{Descriptors, Foldable};
 
 // pub mod parse {
 
@@ -58,26 +51,9 @@ fn main() -> Result<()> {
         .wrap_err_with(|| color_eyre::eyre::eyre!("failed to read file {}", file))?;
     // let _ = SOURCE.set(Mutex::new(ariadne::Source::from(&contents)));
     let mode = Mode::try_from(mode)?;
-    let f: TokenStream =
-        std::str::FromStr::from_str(&contents).map_err(|e| color_eyre::eyre::eyre!("{:?}", e))?;
-    let result: syn::Result<Descriptors> = syn::parse2(f);
-    match result {
-        Ok(res) => {
-           
-            println!("{:#?}", res.descriptors[0]);
-        }
-        Err(e) => {
-            let parser_span = parser::Span::from_span(&contents, e.span());
-            ariadne::Report::build(ariadne::ReportKind::Error, (), parser_span.lo)
-                .with_message(e)
-                .with_label(
-                    Label::new(parser_span.lo..parser_span.hi).with_message("At this location"),
-                )
-                .finish()
-                .eprint(Source::from(&contents))?;
-            // log::error!("{} at {:?}", e, parser_span);
-        }
-    }
+    let descriptors = parser::Parser::parse(&contents)?;
+    let output = gen::codegen(descriptors, mode)?;
+    println!("{}", output);
     // println!("{:?}", result);
     // let mut result = DescriptorParser::parse(Rule::descriptors, &contents)?;
     // let descriptors = result.next().expecting(Rule::descriptors)?;

@@ -34,7 +34,7 @@ fn func_from(tokens: TokenStream2, derive_kind: DeriveKind) -> Option<Ident> {
 
 fn find_derive_attr(attrs: &[Attribute], derive_kind: DeriveKind) -> Option<DeriveAttr> {
     let attr = attrs
-        .into_iter()
+        .iter()
         .find_map(|attr| {
             attr.path.get_ident().map(|id| {
                 if id == "syn" {
@@ -69,6 +69,25 @@ enum AdtKind {
     Enum,
 }
 
+// a crude approximation of whether a type matches a name
+// only looks at the outermost type, even if nested
+fn type_matches(ty: &Type, name: &str) -> bool {
+    if let Type::Path(pth) = &ty {
+        if let Some(segment) = pth.path.segments.first() {
+            if segment.ident == name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// enum FieldKind {
+//     Option(Box<FieldKind>),
+//     Box(Box<FieldKind>),
+//     Plain,
+// }
+
 fn handle_field(
     field: Field,
     attr: Option<DeriveAttr>,
@@ -91,8 +110,16 @@ fn handle_field(
             }
         }
     }
-    let pat = match adt_kind.clone() {
-        AdtKind::Enum => field_to_pat(&field, *index).to_token_stream(),
+    let boxed = type_matches(&ty, "Box");
+    let pat = match adt_kind {
+        AdtKind::Enum => {
+            let p = field_to_pat(&field, *index);
+            if boxed {
+                quote! { (*#p) }
+            } else {
+                p.to_token_stream()
+            }
+        }
         AdtKind::Struct => {
             let member = if let Some(ident) = field.ident.clone() {
                 Member::Named(ident)
@@ -103,6 +130,8 @@ fn handle_field(
             };
             if option && attr.is_some() {
                 quote! { #member }
+            } else if boxed {
+                quote! { (*self.#member) }
             } else {
                 quote! {
                     self.#member
@@ -163,6 +192,8 @@ fn handle_field(
             DeriveKind::Fold => quote! { #member_pat.map(|#pat| #rhs) },
             DeriveKind::Visit => quote! { #member_pat.as_ref().map(|#pat| #rhs) },
         }
+    } else if boxed && attr.is_some() {
+        rhs = quote! { ::std::boxed::Box::new(#rhs) };
     }
 
     match derive_kind {
@@ -194,15 +225,13 @@ fn field_to_pat(field: &Field, index: usize) -> Pat {
 }
 
 fn variant_to_pat(variant: &Variant) -> Pat {
-    let mut index = 0;
     let mut fields = Vec::new();
     let mut tuple_struct = false;
-    for field in &variant.fields {
+    for (index, field) in variant.fields.iter().enumerate() {
         if field.ident.is_none() {
             tuple_struct = true;
         }
         fields.push(field_to_pat(field, index));
-        index += 1;
     }
     let var_name = variant.ident.clone();
     let body = if tuple_struct {
@@ -240,7 +269,7 @@ fn handle_derive_data(data: syn::Data, derive_kind: DeriveKind) -> TokenStream2 
                 }
                 match derive_kind {
                     DeriveKind::Fold => {
-                        let rest = quote! { ..self };
+                        let rest = quote! {};
                         if tuple_struct {
                             quote! {
                                 Self( #fields #rest )
@@ -275,9 +304,8 @@ fn handle_derive_data(data: syn::Data, derive_kind: DeriveKind) -> TokenStream2 
                         (None, None) if tuple_struct => Some(DeriveAttr::Ast(None)),
                         (None, None) => None,
                     };
-                    let field =
-                        handle_field(field, attr, AdtKind::Enum, derive_kind, &mut 0).unwrap();
-                    field
+
+                    handle_field(field, attr, AdtKind::Enum, derive_kind, &mut 0).unwrap()
                 } else {
                     let mut fields = TokenStream2::new();
                     let mut index = 0;

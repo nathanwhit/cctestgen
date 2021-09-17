@@ -1,15 +1,12 @@
 use color_eyre::eyre::eyre;
-use derive_more::{Deref, DerefMut};
-use inflector::Inflector;
+
 use itertools::Itertools;
-use quote::{format_ident, quote, IdentFragment, ToTokens};
-use rand::SeedableRng;
-use rand_chacha::ChaCha12Rng;
+use quote::{format_ident, IdentFragment};
+
 use syn::{parse_quote, visit::Visit, Expr, Ident};
-use tap::{Pipe, Tap, TapFallible};
 
 use super::*;
-use crate::parser::{self, AstVisit, Descriptor, PassFail, Requirement, Statement, Visitable};
+use crate::parser::{self, AstVisit, PassFail, Requirement, Visitable};
 
 pub(crate) struct WalletCounter {
     pub(crate) count: u64,
@@ -104,7 +101,7 @@ impl syn::fold::Fold for Cloner {
                         #id .clone()
                     }
                 }
-                expr => return expr,
+                expr => expr,
             },
             expr => expr,
         }
@@ -146,6 +143,7 @@ impl syn::fold::Fold for Mutifier {
 
 pub(crate) struct TestMetaData {
     pub(crate) name: String,
+    #[allow(dead_code)]
     pub(crate) command: Expr,
     pub(crate) guid: Option<Expr>,
     pub(crate) tx_fee: Option<Expr>,
@@ -155,14 +153,15 @@ pub(crate) struct TestMetaData {
     pub(crate) sighashes: Vec<Ident>,
 }
 
-fn duplicate_meta(meta: &parser::Meta) {
+#[allow(dead_code)]
+fn duplicate_meta(_meta: &parser::Meta) {
     // ariadne::Report::build(ariadne::ReportKind::Error, (), )
 }
 
-impl TryFrom<Vec<parser::Meta>> for TestMetaData {
+impl TryFrom<Vec<parser::MetaDatum>> for TestMetaData {
     type Error = color_eyre::Report;
 
-    fn try_from(value: Vec<parser::Meta>) -> Result<Self, Self::Error> {
+    fn try_from(value: Vec<parser::MetaDatum>) -> Result<Self, Self::Error> {
         let mut name = None;
         let mut command = None;
         let mut guid = None;
@@ -171,25 +170,25 @@ impl TryFrom<Vec<parser::Meta>> for TestMetaData {
         let mut request = None;
         let mut signer = None;
         let mut sighashes = None;
-        for meta in value {
-            match meta {
+        for datum in value {
+            match datum.meta {
                 parser::Meta::Command(c) => {
-                    command = Some(c.0.value);
+                    command = Some(c.value().clone());
                 }
                 parser::Meta::Guid(g) => {
-                    guid = Some(g.0.value);
+                    guid = Some(g.value().clone());
                 }
                 parser::Meta::TxFee(fee) => {
-                    tx_fee = Some(fee.0.value);
+                    tx_fee = Some(fee.value().clone());
                 }
                 parser::Meta::TestType(pf) => {
                     test_kind = Some(pf.value);
                 }
                 parser::Meta::Request(req) => {
-                    request = Some(req.0.value);
+                    request = Some(req.value().clone());
                 }
                 parser::Meta::Signer(s) => {
-                    signer = Some(s.0.value);
+                    signer = Some(s.value().clone());
                 }
                 parser::Meta::SigHashes(sigs) => {
                     sighashes = Some(sigs.idents.into_iter().collect_vec());
@@ -200,13 +199,15 @@ impl TryFrom<Vec<parser::Meta>> for TestMetaData {
             }
         }
         let name = name
-            .ok_or(eyre!("missing test name from metadata"))?
+            .ok_or_else(|| eyre!("missing test name from metadata"))?
             .value();
-        let command = command.ok_or(eyre!("missing command from metadata"))?;
+        let command = command.ok_or_else(|| eyre!("missing command from metadata"))?;
 
-        let test_kind = test_kind.ok_or(eyre!("missing test result (pass/fail) from metadata"))?;
-        let signer = signer.ok_or(eyre!("missing signer from metadata"))?;
-        let sighashes = sighashes.ok_or(eyre!("missing list of sighashes from test metadata"))?;
+        let test_kind =
+            test_kind.ok_or_else(|| eyre!("missing test result (pass/fail) from metadata"))?;
+        let signer = signer.ok_or_else(|| eyre!("missing signer from metadata"))?;
+        let sighashes =
+            sighashes.ok_or_else(|| eyre!("missing list of sighashes from test metadata"))?;
         Ok(TestMetaData {
             name,
             command,

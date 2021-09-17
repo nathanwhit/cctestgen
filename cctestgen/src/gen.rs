@@ -1,19 +1,16 @@
-pub(crate) mod to_rust;
 pub(crate) mod lower;
+pub(crate) mod to_rust;
 
-use std::{convert::TryFrom, ops::Deref, str::FromStr};
+use std::{cell::RefCell, convert::TryFrom};
 
 use color_eyre::eyre::eyre;
 use derive_more::{Deref, DerefMut};
-use inflector::Inflector;
-use itertools::Itertools;
-use quote::{format_ident, quote, IdentFragment, ToTokens};
-use rand::SeedableRng;
-use rand_chacha::ChaCha12Rng;
-use syn::{parse_quote, visit::Visit, Expr, Ident};
-use tap::{Pipe, Tap, TapFallible};
+use proc_macro2::TokenStream;
 
-use crate::parser::{self, AstVisit, Descriptor, PassFail, Requirement, Statement, Visitable};
+use crate::parser::{Descriptors, Foldable};
+
+use self::to_rust::{CodegenCtx, ToRust};
+
 // use color_eyre::Result;
 // use inflector::Inflector;
 // use itertools::Itertools;
@@ -39,22 +36,13 @@ use crate::parser::{self, AstVisit, Descriptor, PassFail, Requirement, Statement
 //     format_ident!("{}_signer", sig)
 // }
 
-use paste::paste;
-
-macro_rules! integration {
-    ($self: ident, $($field: ident : $typ: ty),+) => {
-        $(
-            let $field = $self.inner.$field.clone().integration();
-        ),+
-    };
-}
-
-macro_rules! unit {
-    ($self: ident, $($field: ident),+) => {
-        $(
-            let $field = $self.inner.$field.unit();
-        ),+
-    }
+#[allow(dead_code)]
+pub(crate) fn codegen(descriptors: Descriptors, mode: Mode) -> color_eyre::Result<TokenStream> {
+    let mut cloner = lower::Cloner;
+    let mut mutifier = lower::Mutifier::new();
+    let descriptors = descriptors.fold_with(&mut cloner).fold_with(&mut mutifier);
+    let mut ctx = CodegenCtx::new();
+    descriptors.to_rust(mode, &mut ctx)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,30 +64,41 @@ impl TryFrom<&str> for Mode {
 }
 
 pub(crate) trait ModeWrap: Sized {
-    fn integration(self) -> Integration<Self>;
-    fn unit(self) -> Unit<Self>;
+    fn integration(self, ctx: &mut CodegenCtx) -> Integration<'_, Self>;
+    fn unit(self, ctx: &mut CodegenCtx) -> Unit<'_, Self>;
 }
 
 #[derive(Deref, DerefMut)]
-pub(crate) struct Integration<T> {
+pub(crate) struct Integration<'ctx, T> {
+    #[deref]
+    #[deref_mut]
     pub(crate) inner: T,
+    pub(crate) ctx: RefCell<&'ctx mut CodegenCtx>,
 }
 
 #[derive(Deref, DerefMut)]
-pub(crate) struct Unit<T> {
+pub(crate) struct Unit<'ctx, T> {
+    #[deref]
+    #[deref_mut]
     pub(crate) inner: T,
+    pub(crate) ctx: RefCell<&'ctx mut CodegenCtx>,
 }
 
 impl<T> ModeWrap for T {
-    fn integration(self) -> Integration<Self> {
-        Integration { inner: self }
+    fn integration(self, ctx: &mut CodegenCtx) -> Integration<'_, Self> {
+        Integration {
+            inner: self,
+            ctx: RefCell::new(ctx),
+        }
     }
 
-    fn unit(self) -> Unit<Self> {
-        Unit { inner: self }
+    fn unit(self, ctx: &mut CodegenCtx) -> Unit<'_, Self> {
+        Unit {
+            inner: self,
+            ctx: RefCell::new(ctx),
+        }
     }
 }
-
 
 // #[derive(Clone, Copy, Debug)]
 // pub(crate) enum CloneStrategy {

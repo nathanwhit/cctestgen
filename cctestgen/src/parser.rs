@@ -1,20 +1,19 @@
-#![allow(unused)]
-
+#![allow(unused_variables)]
 use std::ops::Range;
 
 use cctestgen_internal_macros::{Foldable, Visitable};
+use derive_more::Deref;
 use derive_syn_parse::Parse;
 use proc_macro2::LineColumn;
-use quote::IdentFragment;
 use syn::{
-    braced, bracketed,
-    fold::{fold_ident, Fold},
+    braced,
+    fold::Fold,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
     spanned::Spanned,
     token::{self, Bracket},
     visit::Visit,
-    Block, Expr, ExprArray, FieldValue, Ident, LitStr, Stmt, Token,
+    Block, Expr, ExprArray, Ident, LitStr, Stmt, Token,
 };
 
 mod kw {
@@ -55,10 +54,12 @@ mod kw {
 
 syn::custom_punctuation!(TripleDash, ---);
 
+#[allow(dead_code)]
 pub(crate) struct Parser<'a> {
     contents: &'a str,
 }
 
+#[allow(dead_code)]
 impl<'a> Parser<'a> {
     pub(crate) fn parse(contents: &'a str) -> color_eyre::Result<Descriptors> {
         let f: proc_macro2::TokenStream = std::str::FromStr::from_str(contents)
@@ -67,7 +68,7 @@ impl<'a> Parser<'a> {
         match result {
             Ok(descriptors) => Ok(descriptors),
             Err(e) => {
-                let parser_span = Span::from_span(&contents, e.span());
+                let parser_span = Span::from_span(contents, e.span());
                 ariadne::Report::build(ariadne::ReportKind::Error, (), parser_span.lo)
                     .with_message(e)
                     .with_label(
@@ -106,27 +107,10 @@ impl Parse for Descriptors {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Foldable, Visitable)]
 pub(crate) struct Descriptor {
-    body: Vec<MetaOrStatement>,
-}
-
-impl Visitable for Descriptor {
-    fn visit_with<'ast, V>(&'ast self, visitor: &mut V)
-    where
-        V: Visit<'ast> + AstVisit<'ast> + ?Sized,
-    {
-        todo!()
-    }
-}
-
-impl Foldable for Descriptor {
-    fn fold_with<F>(self, folder: &mut F) -> Self
-    where
-        F: Fold + ?Sized,
-    {
-        todo!()
-    }
+    #[ast_iter]
+    pub(crate) body: Vec<MetaOrStatement>,
 }
 
 impl<'a, T> Visitable for &'a T
@@ -142,7 +126,7 @@ where
 }
 
 impl Descriptor {
-    pub(crate) fn meta(&self) -> Vec<Meta> {
+    pub(crate) fn meta(&self) -> Vec<MetaDatum> {
         self.body
             .iter()
             .filter_map(|s| match s {
@@ -177,7 +161,6 @@ impl Parse for Descriptor {
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
 pub(crate) struct RustBlock {
     pub(crate) rust_token: kw::rust,
-    #[syn(block)]
     pub(crate) block: Block,
 }
 
@@ -193,10 +176,10 @@ impl StmtBlock {
         let mut stmts = Vec::new();
         loop {
             while let Some(semi) = input.parse::<Option<Token![;]>>()? {
-                stmts.push(Statement::Rust(Stmt::Semi(
+                stmts.push(Statement::Rust(Box::new(Stmt::Semi(
                     Expr::Verbatim(proc_macro2::TokenStream::new()),
                     semi,
-                )));
+                ))));
             }
             if input.is_empty() {
                 break;
@@ -221,7 +204,7 @@ impl Parse for StmtBlock {
 #[derive(Debug, Clone, Foldable, Visitable)]
 pub(crate) enum MetaOrStatement {
     #[ast]
-    Meta(Meta),
+    Meta(MetaDatum),
     #[ast(statement)]
     Statement(Statement),
 }
@@ -241,7 +224,6 @@ impl Parse for MetaOrStatement {
 pub(crate) enum Statement {
     #[ast]
     Expect(ExpectStmt),
-    #[ast]
     Verbatim(RustBlock),
     #[ast]
     Integration(StmtBlock),
@@ -250,7 +232,7 @@ pub(crate) enum Statement {
     #[ast]
     Require(RequireStmt),
     #[syn(stmt)]
-    Rust(Stmt),
+    Rust(Box<Stmt>),
 }
 
 impl Parse for Statement {
@@ -275,6 +257,14 @@ impl Parse for Statement {
         }
         stmt
     }
+}
+
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+pub(crate) struct MetaDatum {
+    meta_token: kw::meta,
+    #[ast]
+    pub(crate) meta: Meta,
+    semi_token: Option<Token![;]>,
 }
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
@@ -520,11 +510,11 @@ pub(crate) struct StateMapping {
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
 pub(crate) struct StateEntry {
     #[syn(expr)]
-    key: Expr,
+    pub(crate) key: Expr,
     arrow_token: Option<Token![=>]>,
     #[syn(expr)]
     #[parse_if(arrow_token.is_some())]
-    value: Option<Expr>,
+    pub(crate) value: Option<Expr>,
 }
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
@@ -547,12 +537,12 @@ pub(crate) enum Requirement {
         tx_token: kw::transaction,
         eq_token: Option<Token![=]>,
         #[syn(expr)]
-        tx: Expr,
+        tx: Box<Expr>,
         with_token: kw::with,
         signer_token: kw::signer,
         eq_token2: Option<Token![=]>,
         #[syn(expr)]
-        signer: Expr,
+        signer: Box<Expr>,
         #[ast]
         #[peek(Token![,])]
         guid: Option<CommaThenGuid>,
@@ -561,9 +551,11 @@ pub(crate) enum Requirement {
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
 pub(crate) struct CommaThenGuid {
-    comma: Token![,],
-    #[ast]
-    guid: GuidMeta,
+    pub(crate) comma: Token![,],
+    pub(crate) guid_token: kw::guid,
+    pub(crate) eq_token: Option<Token![=]>,
+    #[syn(expr)]
+    pub(crate) guid: Box<Expr>,
 }
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
@@ -574,7 +566,7 @@ pub(crate) struct ExpectStmt {
     #[ast_iter(expectation)]
     #[inside(paren_token)]
     #[call(Punctuated::parse_terminated)]
-    expectations: Punctuated<Expectation, Token![,]>,
+    pub(crate) expectations: Punctuated<Expectation, Token![,]>,
 }
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
@@ -589,7 +581,7 @@ pub(crate) struct RequireStmt {
 }
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
-pub(crate) struct MetaItem<Name: Parse> {
+pub(crate) struct MetaItem<Name> {
     pub(crate) name_token: Name,
     pub(crate) equals_token: token::Eq,
     #[syn(expr)]
@@ -617,20 +609,26 @@ pub(crate) struct SigHashesMeta {
     pub(crate) idents: Punctuated<Ident, Token![,]>,
 }
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Deref)]
 pub(crate) struct CommandMeta(pub(crate) MetaItem<kw::command>);
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Deref)]
 pub(crate) struct SignerMeta(pub(crate) MetaItem<kw::signer>);
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Deref)]
 pub(crate) struct TxFeeMeta(pub(crate) MetaItem<kw::tx_fee>);
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Deref)]
 pub(crate) struct RequestMeta(pub(crate) MetaItem<kw::request>);
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Deref)]
 pub(crate) struct GuidMeta(pub(crate) MetaItem<kw::guid>);
+
+impl<Name: Parse> MetaItem<Name> {
+    pub(crate) fn value(&self) -> &Expr {
+        &self.value
+    }
+}
 
 #[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
 pub(crate) enum PassFail {
@@ -642,7 +640,7 @@ pub(crate) enum PassFail {
         err_token: kw::err,
         equals_token: Token![=],
         #[syn(expr)]
-        err: Expr,
+        err: Box<Expr>,
     },
 }
 

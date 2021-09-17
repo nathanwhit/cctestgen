@@ -1,4 +1,3 @@
-#![allow(unused)]
 pub(crate) mod ast;
 pub(crate) mod gen;
 pub(crate) mod parser;
@@ -11,7 +10,6 @@ pub(crate) mod parser;
 
 use color_eyre::Result;
 
-use pest::{iterators::Pairs, Parser};
 // use quote::quote;
 
 // pub(crate) mod parse {
@@ -45,43 +43,7 @@ pub fn cc_test(input: TokenStream) -> TokenStream {
     }
 }
 
-fn handle_parsed(mut input: Pairs<()>, mode: ()) -> Result<proc_macro2::TokenStream> {
-    // let descriptors = input.next().expecting(Rule::descriptors)?;
-    // let mut code = Vec::new();
-    // let mut ctx = CodegenCtx::new();
-    // for p in descriptors.into_inner() {
-    //     if let Rule::EOI = p.as_rule() {
-    //         continue;
-    //     }
-    //     let descriptor = Descriptor::parse(p)?;
-    //     let rust = descriptor.to_rust(mode, &mut ctx)?;
-    //     code.push(rust);
-    // }
-    // if let Mode::Unit = mode {
-    //     Ok(quote! {
-    //         #[cfg(all(not(feature = "integration-testing"), test, feature = "mock"))]
-    //         mod test {
-    //             use crate::handler::tests::execution::*;
-    //             use crate::test_utils::*;
-
-    //             #( #code )*
-    //         }
-    //     })
-    // } else {
-    //     Ok(quote! {
-    //         #[cfg(feature = "integration-testing")]
-    //         mod test {
-    //             use crate::common::*;
-    //             use ccprocessor_rust::test_utils::*;
-
-    //             #( #code )*
-    //         }
-    //     })
-    // }
-    todo!()
-}
-
-fn entry(input: &str) -> Result<TokenStream> {
+fn entry(_input: &str) -> Result<TokenStream> {
     // let result = DescriptorParser::parse(Rule::descriptors, &input)?;
     // let unit = handle_parsed(result.clone(), Mode::Unit)?;
 

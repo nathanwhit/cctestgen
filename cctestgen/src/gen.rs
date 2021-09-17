@@ -13,9 +13,7 @@ use self::to_rust::{CodegenCtx, ToRust};
 
 #[allow(dead_code)]
 pub(crate) fn codegen(descriptors: Descriptors, mode: Mode) -> color_eyre::Result<TokenStream> {
-    let mut cloner = lower::Cloner;
-    let mut mutifier = lower::Mutifier::new();
-    let descriptors = descriptors.fold_with(&mut cloner).fold_with(&mut mutifier);
+    let descriptors = lower::transform(descriptors);
     let mut ctx = CodegenCtx::new();
     descriptors.to_rust(mode, &mut ctx)
 }

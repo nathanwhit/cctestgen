@@ -192,7 +192,7 @@ fn handle_field(
             DeriveKind::Fold => quote! { #member_pat.map(|#pat| #rhs) },
             DeriveKind::Visit => quote! { #member_pat.as_ref().map(|#pat| #rhs) },
         }
-    } else if boxed && attr.is_some() {
+    } else if boxed {
         rhs = quote! { ::std::boxed::Box::new(#rhs) };
     }
 

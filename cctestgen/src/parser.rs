@@ -517,7 +517,7 @@ pub(crate) struct StateEntry {
     pub(crate) value: Option<Expr>,
 }
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Hash, Eq)]
 pub(crate) enum Requirement {
     #[peek(kw::Wallet, name = "Wallet requirement")]
     Wallet {
@@ -549,7 +549,7 @@ pub(crate) enum Requirement {
     },
 }
 
-#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq)]
+#[derive(Debug, Parse, Foldable, Visitable, Clone, PartialEq, Hash, Eq)]
 pub(crate) struct CommaThenGuid {
     pub(crate) comma: Token![,],
     pub(crate) guid_token: kw::guid,

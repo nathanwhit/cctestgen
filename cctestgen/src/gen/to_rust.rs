@@ -34,7 +34,7 @@ pub(crate) trait ToRust: Sized {
     ) -> color_eyre::Result<proc_macro2::TokenStream>;
 }
 
-fn sig_to_signer(sig: impl IdentFragment) -> Ident {
+pub(crate) fn sig_to_signer(sig: impl IdentFragment) -> Ident {
     format_ident!("{}_signer", sig)
 }
 
@@ -51,11 +51,11 @@ fn root_for(mode: Mode) -> TokenStream {
     }
 }
 
-fn sig_to_walletid(sig: impl IdentFragment) -> Ident {
+pub(crate) fn sig_to_walletid(sig: impl IdentFragment) -> Ident {
     format_ident!("{}_wallet_id_", sig)
 }
 
-fn command_to_guid(command: impl IdentFragment) -> Ident {
+pub(crate) fn command_to_guid(command: impl IdentFragment) -> Ident {
     format_ident!("{}_guid_", command)
 }
 
@@ -455,7 +455,7 @@ impl ToRust for Requirement {
 
 struct Finder<const N: usize> {
     values: [&'static str; N],
-    found: bool,
+    found: Option<&'static str>,
 }
 
 impl<'ast, const N: usize> Visit<'ast> for Finder<N> {
@@ -464,7 +464,7 @@ impl<'ast, const N: usize> Visit<'ast> for Finder<N> {
             let ident = &p.path.segments.last().unwrap().ident;
             for value in self.values {
                 if ident == value {
-                    self.found = true;
+                    self.found = Some(value);
                     return;
                 }
             }
@@ -476,32 +476,36 @@ impl<'ast, const N: usize> AstVisit<'ast> for Finder<N> {}
 
 const OPTION_FINDER: Finder<2> = Finder {
     values: ["Some", "None"],
-    found: false,
+    found: None,
 };
 
 const RESULT_FINDER: Finder<2> = Finder {
     values: ["Ok", "Err"],
-    found: false,
+    found: None,
 };
 
-fn is_option(expr: &Expr) -> bool {
-    let mut finder = OPTION_FINDER;
-    finder.visit_expr(expr);
-    finder.found
+fn is_option(expr: &Expr, finder: Option<&mut Finder<2>>) -> bool {
+    if let Some(finder) = finder {
+        finder.visit_expr(expr);
+        finder.found.is_some()
+    } else {
+        let mut finder = OPTION_FINDER;
+        finder.visit_expr(expr);
+        finder.found.is_some()
+    }
 }
 
-fn into_option(expr: &Expr) -> Expr {
-    if is_option(expr) {
+fn into_option(expr: &Expr, finder: Option<&mut Finder<2>>) -> Expr {
+    if is_option(expr, finder) {
         expr.clone()
     } else {
-        println!("{:?}", expr);
         parse_quote!(Some(#expr))
     }
 }
 fn is_result(expr: &Expr) -> bool {
     let mut finder = RESULT_FINDER;
     finder.visit_expr(expr);
-    finder.found
+    finder.found.is_some()
 }
 
 fn into_result(expr: &Expr) -> Expr {
@@ -525,7 +529,7 @@ impl ToRust for Expectation {
                     return_expr,
                     ..
                 } => {
-                    let is_option = is_option(return_expr);
+                    let is_option = is_option(return_expr, None);
 
                     let casted = if is_option {
                         quote! {
@@ -552,18 +556,16 @@ impl ToRust for Expectation {
                     return_expr,
                     ..
                 } => {
-                    let ret = into_option(return_expr);
-
-                    // let ret = if let Expr::Option(o) = ret {
-                    //     match o {
-                    //         Some(expr) => Expr::Option(Some(expr)).to_rust(mode, ctx)?,
-                    //         None => quote! {
-                    //             <Option<crate::protos::Wallet>>::None
-                    //         },
-                    //     }
-                    // } else {
-                    //     ret.to_rust(mode, ctx)?
-                    // };
+                    let mut finder = OPTION_FINDER;
+                    let ret = into_option(return_expr, Some(&mut finder));
+                    let ret = if let Some(value) = finder.found {
+                        match value {
+                            "None" => parse_quote!(<Option<crate::protos::Wallet>>::None),
+                            _ => ret,
+                        }
+                    } else {
+                        ret
+                    };
 
                     quote! {
                         expect_get_state_entry(

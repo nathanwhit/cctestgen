@@ -1,27 +1,35 @@
+use std::collections::HashSet;
+
 use color_eyre::eyre::eyre;
 
 use itertools::Itertools;
 use quote::{format_ident, IdentFragment};
 
-use syn::{parse_quote, visit::Visit, Expr, Ident};
+use syn::{fold::Fold, parse_quote, visit::Visit, Expr, ExprCall, Ident};
 
 use super::*;
 use crate::parser::{self, AstVisit, PassFail, Requirement, Visitable};
 
 pub(crate) struct WalletCounter {
     pub(crate) count: u64,
+    seen: HashSet<Requirement>,
 }
 
 impl WalletCounter {
     pub(crate) fn new() -> Self {
-        Self { count: 0 }
+        Self {
+            count: 0,
+            seen: HashSet::new(),
+        }
     }
 }
 impl<'ast> Visit<'ast> for WalletCounter {}
 impl<'ast> AstVisit<'ast> for WalletCounter {
     fn visit_requirement(&mut self, requirement: &'ast crate::parser::Requirement) {
         if let Requirement::Wallet { .. } = requirement {
-            self.count += 1;
+            if self.seen.insert(requirement.clone()) {
+                self.count += 1;
+            }
         }
     }
 }
@@ -80,31 +88,41 @@ fn ident_from_path(path: &syn::Path) -> Option<Ident> {
 
 impl syn::fold::Fold for Cloner {
     fn fold_expr(&mut self, expr: Expr) -> Expr {
+        // println!("{:?}", expr);
         match expr.clone() {
             Expr::Path(path) => {
-                log::info!("Found path = {:?}", path);
-                let id = match ident_from_path(&path.path) {
-                    Some(id) => id,
-                    None => return Expr::Path(path),
-                };
-                parse_quote! {
-                    #id .clone()
+                if let Some(id) = ident_from_path(&path.path) {
+                    if id != "tse" && !id.to_string().as_str().ends_with("signer") {
+                        // println!("CLONING {:?}", expr);
+                        return parse_quote!( #id.clone() );
+                    }
                 }
             }
             Expr::Field(field) => match *field.base {
                 Expr::Path(path) => {
-                    let id = match ident_from_path(&path.path) {
-                        Some(id) => id,
-                        None => return expr,
-                    };
-                    parse_quote! {
-                        #id .clone()
+                    if let Some(id) = ident_from_path(&path.path) {
+                        return parse_quote!( #id.clone() );
                     }
                 }
-                expr => expr,
+                _ => {}
             },
-            expr => expr,
+            Expr::Call(call) => {
+                return Expr::Call(ExprCall {
+                    args: call.args.into_iter().map(|a| self.fold_expr(a)).collect(),
+                    ..call
+                });
+            }
+            _ => {}
         }
+        syn::fold::fold_expr(self, expr)
+    }
+
+    fn fold_field_value(&mut self, i: syn::FieldValue) -> syn::FieldValue {
+        let mut folded = syn::fold::fold_field_value(self, i.clone());
+        if folded != i {
+            folded.colon_token = Some(syn::token::Colon::default());
+        }
+        folded
     }
 }
 
@@ -123,8 +141,8 @@ impl syn::fold::Fold for Mutifier {
     fn fold_local(&mut self, i: syn::Local) -> syn::Local {
         self.in_local = true;
         let folded = syn::Local {
-            pat: self.fold_pat(i.pat),
-            ..i
+            pat: self.fold_pat(i.pat.clone()),
+            ..syn::fold::fold_local(self, i.clone())
         };
         self.in_local = false;
         folded
@@ -139,6 +157,55 @@ impl syn::fold::Fold for Mutifier {
             i
         }
     }
+}
+
+pub(crate) struct MacroDesugarer;
+
+impl Fold for MacroDesugarer {
+    fn fold_expr(&mut self, i: Expr) -> Expr {
+        if let Expr::Macro(macro_expr) = i.clone() {
+            if let Some(ident) = macro_expr.mac.path.get_ident() {
+                match ident.to_string().as_str() {
+                    "Guid" => {
+                        if macro_expr.mac.tokens.is_empty() {
+                            return parse_quote!(Guid::new());
+                        }
+                        if let Ok(id) = syn::parse2::<Ident>(macro_expr.mac.tokens) {
+                            let guid = super::to_rust::command_to_guid(id);
+                            return parse_quote!(#guid);
+                        }
+                    }
+                    "SigHash" => {
+                        if let Ok(id) = syn::parse2::<Ident>(macro_expr.mac.tokens) {
+                            return parse_quote!(#id);
+                        }
+                    }
+                    "WalletId" => {
+                        if let Ok(id) = syn::parse2::<Ident>(macro_expr.mac.tokens) {
+                            let wallet_id = super::to_rust::sig_to_walletid(id);
+                            return parse_quote!(#wallet_id);
+                        }
+                    }
+                    "Signer" => {
+                        if let Ok(id) = syn::parse2::<Ident>(macro_expr.mac.tokens) {
+                            let signer = super::to_rust::sig_to_signer(id);
+                            return parse_quote!(#signer);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        syn::fold::fold_expr(self, i)
+    }
+}
+
+pub(crate) fn transform(descriptors: Descriptors) -> Descriptors {
+    let mut mutifier = Mutifier::new();
+    descriptors
+        .fold_with(&mut MacroDesugarer)
+        .fold_with(&mut Cloner)
+        .fold_with(&mut mutifier)
 }
 
 pub(crate) struct TestMetaData {
